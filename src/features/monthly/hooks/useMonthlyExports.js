@@ -21,6 +21,20 @@ const loadJpegReportExporter = () =>
     (mod) => mod.exportDonationReportJpeg,
   );
 
+function describeAbatementSheetExport(result, isPendingSheet) {
+  if (result.rowCount === 0) {
+    return isPendingSheet
+      ? "Nenhum abatimento pendente — nenhuma planilha foi gerada."
+      : "Nenhuma doação neste mês — nenhuma planilha foi gerada.";
+  }
+
+  if (isPendingSheet) {
+    return `${formatInteger(result.rowCount)} CPF(s) com ${formatInteger(result.monthCount)} mês(es) pendente(s) somados, em ${formatInteger(result.demandCount)} planilha(s), uma por demanda.`;
+  }
+
+  return `${result.rowCount} CPF(s) em ${result.demandCount} planilha(s), uma por demanda.`;
+}
+
 /**
  * Os cinco caminhos de exportacao da Gestao Mensal.
  *
@@ -131,43 +145,44 @@ export function useMonthlyExports({
     }
   };
 
-  // Planilha para o sistema externo dar baixa nas doações. Exige um mês
-  // selecionado: a descrição de cada linha carrega o mês, então uma exportação
-  // "todos os meses" produziria descrições ambíguas no destino.
+  // Planilha para o sistema externo dar baixa nas doações. Com um mês
+  // selecionado, é a daquele mês. Sem mês, é a de TODOS os meses ainda
+  // pendentes somados por CPF — a descrição de cada linha nomeia os meses que
+  // ela soma ("Jan/2026 e Fev/2026"), então o destino continua sabendo o que
+  // está sendo abatido.
   const handleExportAbatementSheet = async () => {
     if (isExportingAbatementSheet) return;
     setError("");
     setSuccessMessage("");
     setSuccessAction(null);
 
-    if (!filters.referenceMonth) {
-      setError(
-        "Selecione um mês antes de exportar a planilha de abatimento — a descrição de cada linha depende do mês.",
-      );
-      return;
-    }
+    const isPendingSheet = !filters.referenceMonth;
 
     setIsExportingAbatementSheet(true);
     try {
       const result = await monthlyOperation.run(
         () =>
           exportAbatementSheetWorkbook({ referenceMonth: filters.referenceMonth }),
-        { loadingMessage: "Gerando planilha de abatimento..." },
+        {
+          loadingMessage: isPendingSheet
+            ? "Gerando planilha dos meses pendentes..."
+            : "Gerando planilha de abatimento...",
+        },
       );
-      const exportSummary =
-        result.rowCount === 0
-          ? "Nenhuma doação neste mês — nenhuma planilha foi gerada."
-          : `${result.rowCount} CPF(s) em ${result.demandCount} planilha(s), uma por demanda.`;
+      const exportSummary = describeAbatementSheetExport(result, isPendingSheet);
       await createActionHistoryEntry({
         actionType: "export",
         entityType: "export",
-        entityId: "abatement-sheet",
-        label: "Planilha de abatimento",
+        entityId: isPendingSheet ? "abatement-sheet-pending" : "abatement-sheet",
+        label: isPendingSheet
+          ? "Planilha de abatimento (pendentes)"
+          : "Planilha de abatimento",
         description: exportSummary,
         payload: {
           referenceMonth: filters.referenceMonth,
           rowCount: result.rowCount,
           demandCount: result.demandCount,
+          monthCount: result.monthCount,
           fileNames: result.fileNames,
         },
       });

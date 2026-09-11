@@ -1,5 +1,8 @@
 import { listDonors } from "./donorService.js";
-import { listAbatementSheetRows } from "./monthly/abatementSheet.js";
+import {
+  listAbatementSheetRows,
+  listPendingAbatementSheetRows,
+} from "./monthly/abatementSheet.js";
 import { buildAbatementWorkbookBytes } from "./monthly/abatementSheetWorkbook.js";
 import { listMonthlySummaries } from "./monthlyService.js";
 import {
@@ -229,15 +232,31 @@ export async function exportReconciliationPairsCsv(filters = {}) {
  *
  * Com mais de uma demanda os arquivos vão num .zip (mesmo padrão dos
  * relatórios PDF/JPEG por demanda); com uma só, baixa a planilha direto.
+ *
+ * Sem mês, sai a planilha de TODOS os meses pendentes, somados por CPF. Não
+ * fica ambígua no destino: a descrição de cada linha nomeia os meses que ela
+ * soma, e a data sai do mês mais recente daquela linha.
  */
 export async function exportAbatementSheetWorkbook({ referenceMonth } = {}) {
-  const rows = await listAbatementSheetRows({ referenceMonth });
-  const monthSuffix = referenceMonth
-    ? `-${String(referenceMonth).slice(0, 7)}`
-    : "";
+  const isPendingSheet = !referenceMonth;
+  const rows = isPendingSheet
+    ? await listPendingAbatementSheetRows()
+    : await listAbatementSheetRows({ referenceMonth });
+  const monthSuffix = isPendingSheet
+    ? "-pendentes"
+    : `-${String(referenceMonth).slice(0, 7)}`;
+  const monthCount = isPendingSheet
+    ? new Set(rows.flatMap((row) => row.referenceMonths ?? [])).size
+    : 1;
 
   if (rows.length === 0) {
-    return { rowCount: 0, demandCount: 0, fileNames: [] };
+    return {
+      rowCount: 0,
+      demandCount: 0,
+      monthCount: 0,
+      fileNames: [],
+      isPendingSheet,
+    };
   }
 
   // Agrupa preservando a ordem em que as demandas aparecem (a query já vem
@@ -284,7 +303,9 @@ export async function exportAbatementSheetWorkbook({ referenceMonth } = {}) {
   return {
     rowCount: rows.length,
     demandCount: files.length,
+    monthCount,
     fileNames: files.map((file) => file.fileName),
+    isPendingSheet,
   };
 }
 

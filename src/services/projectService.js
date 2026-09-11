@@ -6,6 +6,7 @@ import {
   runInTransaction,
   startOfMonth,
 } from "./db";
+import { reconcileImportsForCpfs } from "./import/importReconcile";
 import { createActionHistoryEntry } from "./actionHistoryService";
 import { createTrashItem } from "./trashService";
 import { buildSlug } from "../utils/slug";
@@ -379,6 +380,14 @@ export async function listDonorAssignments(donorId) {
   return rows.map(mapAssignmentRow);
 }
 
+// Um vínculo com a vigência já resolvida. Compartilhado pelo cadastro, pela
+// transferência e pelo vínculo manual, para os três gravarem a mesma forma.
+const INSERT_ASSIGNMENT_SQL = `
+    INSERT INTO donor_project_assignments
+      (id, donor_id, project_id, valid_from, valid_to, reason, created_at)
+    VALUES (?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?, CURRENT_TIMESTAMP)
+  `;
+
 /**
  * Primeiro vínculo de um doador — usado no cadastro.
  *
@@ -397,11 +406,7 @@ export async function assignDonorToProject({
   }
 
   await executePrepared(
-    `
-    INSERT INTO donor_project_assignments
-      (id, donor_id, project_id, valid_from, valid_to, reason, created_at)
-    VALUES (?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), ?, CURRENT_TIMESTAMP)
-  `,
+    INSERT_ASSIGNMENT_SQL,
     [
       nanoid(),
       donorId,
@@ -415,17 +420,189 @@ export async function assignDonorToProject({
 }
 
 /**
+ * A demanda que o doador leva para o projeto de destino.
+ *
+ * Projeto que classifica por demanda não sabe exibir doador sem uma: a Gestão
+ * Mensal agrupa, filtra e gera relatório e planilha por ela, e o doador
+ * transferido chegava lá como "Demanda: Não informada". Por isso ela é exigida
+ * na própria transferência — e tem de ser uma demanda ativa DO DESTINO, porque
+ * a do projeto de origem não existe lá.
+ *
+ * Devolve `null` quando o destino não usa demandas. Nesse caso a demanda do
+ * doador fica como está: os meses que continuam no projeto de origem ainda a
+ * exibem, e apagá-la reescreveria o passado de lá.
+ */
+async function resolveDestinationDemand(project, demand) {
+  if (project.modules?.demands === false) {
+    return null;
+  }
+
+  const trimmedDemand = String(demand ?? "").trim();
+
+  if (!trimmedDemand) {
+    throw new Error(`Selecione a demanda do doador em ${project.name}.`);
+  }
+
+  const rows = await queryPrepared(
+    `
+    SELECT name
+    FROM demands
+    WHERE project_id = ?
+      AND is_active = TRUE
+      AND lower(trim(name)) = lower(trim(?))
+    LIMIT 1
+  `,
+    [project.id, trimmedDemand],
+  );
+
+  if (rows.length === 0) {
+    throw new Error(`A demanda selecionada não existe em ${project.name}.`);
+  }
+
+  return rows[0].name;
+}
+
+async function setDonorDemand(donorId, demandName) {
+  await executePrepared(
+    `
+    UPDATE donors
+    SET demand = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `,
+    [demandName, donorId],
+  );
+}
+
+/**
+ * Refaz os resumos mensais do doador depois de trocar a demanda.
+ *
+ * A Gestão Mensal não lê a demanda da ficha do doador: lê a cópia gravada no
+ * resumo mensal quando a importação é reconciliada. Sem refazer, a demanda
+ * nova só apareceria na próxima importação — e até lá o doador continuaria
+ * como "Não informada", fora do filtro e do relatório da demanda escolhida.
+ */
+async function refreshDonorMonthlySummaries(donorId) {
+  const rows = await queryPrepared(
+    `
+    SELECT cpf
+    FROM donor_cpf_links
+    WHERE donor_id = ?
+      AND is_active = TRUE
+  `,
+    [donorId],
+  );
+
+  await reconcileImportsForCpfs(rows.map((row) => row.cpf));
+}
+
+/**
+ * Vincula, pela ficha do doador, quem não tem vínculo nenhum.
+ *
+ * Mesma abertura de `assignDonorToProject` — desde o início do histórico, para
+ * o crédito passado também contar —, mais a demanda do destino, pelo mesmo
+ * motivo da transferência. Fica separada porque `assignDonorToProject` roda
+ * dentro da transação do cadastro, onde a demanda já foi validada.
+ */
+export async function assignUnlinkedDonorToProject({
+  donorId,
+  projectId,
+  demand = "",
+}) {
+  if (!donorId) {
+    throw new Error("O doador é obrigatório para criar o vínculo.");
+  }
+
+  if (!projectId) {
+    throw new Error("Selecione o projeto de destino.");
+  }
+
+  const project = await findProjectById(projectId);
+
+  if (!project) {
+    throw new Error("O projeto de destino não existe mais.");
+  }
+
+  const demandName = await resolveDestinationDemand(project, demand);
+
+  await runInTransaction(
+    async () => {
+      await executePrepared(INSERT_ASSIGNMENT_SQL, [
+        nanoid(),
+        donorId,
+        projectId,
+        ASSIGNMENT_OPEN_START,
+        ASSIGNMENT_OPEN_END,
+        "vinculo-manual",
+      ]);
+
+      if (demandName !== null) {
+        await setDonorDemand(donorId, demandName);
+      }
+    },
+    // `runInTransaction` lê `changeSource`/`changeDomains`. Com `source`/
+    // `domains` (as chaves do `executePrepared`) as opções eram ignoradas em
+    // silêncio e o evento saía como "transaction", sem domínio.
+    {
+      changeSource: "projects",
+      changeDomains: ["projects", "donors", "monthly"],
+    },
+  );
+
+  if (demandName !== null) {
+    await refreshDonorMonthlySummaries(donorId);
+  }
+}
+
+/**
+ * Meses em que o doador teve nota válida, do mais antigo ao mais recente, em
+ * `AAAA-MM`.
+ *
+ * A transferência usa a lista para sugerir o mês e para dizer, antes de
+ * confirmar, quais doações mudam de projeto e quais ficam. Mesmos filtros da
+ * descoberta do início das doações: importação que não foi processada e linha
+ * só com nota inválida não contam.
+ */
+export async function listDonorDonationMonths(donorId) {
+  if (!donorId) {
+    return [];
+  }
+
+  const rows = await queryPrepared(
+    `
+    SELECT DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m') AS month
+    FROM import_cpf_summary
+    INNER JOIN donor_cpf_links
+      ON donor_cpf_links.cpf = import_cpf_summary.cpf
+      AND donor_cpf_links.is_active = TRUE
+    INNER JOIN imports
+      ON imports.id = import_cpf_summary.import_id
+    WHERE donor_cpf_links.donor_id = ?
+      AND import_cpf_summary.notes_count > 0
+      AND imports.status = 'processed'
+    ORDER BY month ASC
+  `,
+    [donorId],
+  );
+
+  return rows.map((row) => String(row.month));
+}
+
+/**
  * Transfere um doador para outro projeto a partir de um mês.
  *
  * Esta é a operação que protege o histórico: ela FECHA a janela anterior no
  * mês anterior ao efetivo e ABRE uma nova — nunca reescreve o `project_id` do
  * vínculo existente. As doações já consolidadas continuam somando para o
  * projeto antigo porque a janela fechada nunca mais é tocada.
+ *
+ * Quando o destino classifica por demanda, a demanda é obrigatória e é
+ * gravada na mesma transação — ver `resolveDestinationDemand`.
  */
 export async function transferDonorToProject({
   donorId,
   projectId,
   effectiveMonth,
+  demand = "",
 }) {
   const normalizedMonth = startOfMonth(effectiveMonth);
 
@@ -435,6 +612,12 @@ export async function transferDonorToProject({
 
   if (!projectId) {
     throw new Error("Selecione o projeto de destino.");
+  }
+
+  const project = await findProjectById(projectId);
+
+  if (!project) {
+    throw new Error("O projeto de destino não existe mais.");
   }
 
   const openRows = await queryPrepared(
@@ -460,6 +643,8 @@ export async function transferDonorToProject({
     );
   }
 
+  const demandName = await resolveDestinationDemand(project, demand);
+
   await runInTransaction(
     async () => {
       if (current) {
@@ -476,17 +661,31 @@ export async function transferDonorToProject({
         );
       }
 
-      await executePrepared(
-        `
-        INSERT INTO donor_project_assignments
-          (id, donor_id, project_id, valid_from, valid_to, reason, created_at)
-        VALUES (?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), 'transferencia', CURRENT_TIMESTAMP)
-      `,
-        [nanoid(), donorId, projectId, normalizedMonth, ASSIGNMENT_OPEN_END],
-      );
+      await executePrepared(INSERT_ASSIGNMENT_SQL, [
+        nanoid(),
+        donorId,
+        projectId,
+        normalizedMonth,
+        ASSIGNMENT_OPEN_END,
+        "transferencia",
+      ]);
+
+      if (demandName !== null) {
+        await setDonorDemand(donorId, demandName);
+      }
     },
-    { source: "projects", domains: ["projects", "donors", "monthly"] },
+    // `runInTransaction` lê `changeSource`/`changeDomains`. Com `source`/
+    // `domains` (as chaves do `executePrepared`) as opções eram ignoradas em
+    // silêncio e o evento saía como "transaction", sem domínio.
+    {
+      changeSource: "projects",
+      changeDomains: ["projects", "donors", "monthly"],
+    },
   );
+
+  if (demandName !== null) {
+    await refreshDonorMonthlySummaries(donorId);
+  }
 }
 
 /** Crédito conciliado por projeto e mês. `projectId` nulo = não atribuído. */

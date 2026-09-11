@@ -101,6 +101,62 @@ export function formatMonthAbbrev(value) {
   return `${MONTH_ABBREVIATIONS[monthIndex]}/${year}`;
 }
 
+function toAbsoluteMonthIndex(month) {
+  const match = /^(\d{4})-(\d{2})$/.exec(month);
+  return match ? Number(match[1]) * 12 + Number(match[2]) - 1 : null;
+}
+
+/**
+ * Rótulo de um conjunto de meses.
+ *
+ *   um mês                 "Mar/2026"
+ *   dois meses             "Jan/2026 e Fev/2026"
+ *   três ou mais seguidos  "Jan/2026 até Mar/2026"
+ *   três ou mais com falha "Jan/2026, Mar/2026 e Abr/2026"
+ *
+ * O "até" só aparece quando não há buraco. Janeiro, março e abril como
+ * "Jan/2026 até Abr/2026" diria que fevereiro está no total — e o sistema de
+ * baixa registraria um mês que ninguém abateu. A virada de ano conta como
+ * seguida (dez → jan), por isso a comparação é por índice absoluto de mês e
+ * não pelo número do mês sozinho.
+ *
+ * Aceita `AAAA-MM` ou data completa, em qualquer ordem e com repetição.
+ */
+export function formatMonthsSpan(months = []) {
+  const unicos = [
+    ...new Set(
+      months
+        .map((month) => String(month ?? "").slice(0, 7))
+        .filter((month) => /^\d{4}-\d{2}$/.test(month)),
+    ),
+  ].sort();
+
+  if (unicos.length === 0) {
+    return "";
+  }
+
+  const rotulos = unicos.map((month) => formatMonthAbbrev(month));
+
+  if (rotulos.length === 1) {
+    return rotulos[0];
+  }
+
+  if (rotulos.length === 2) {
+    return `${rotulos[0]} e ${rotulos[1]}`;
+  }
+
+  const indices = unicos.map(toAbsoluteMonthIndex);
+  const seguidos = indices.every(
+    (indice, posicao) => posicao === 0 || indice === indices[posicao - 1] + 1,
+  );
+
+  if (seguidos) {
+    return `${rotulos[0]} até ${rotulos[rotulos.length - 1]}`;
+  }
+
+  return `${rotulos.slice(0, -1).join(", ")} e ${rotulos[rotulos.length - 1]}`;
+}
+
 /**
  * "2026-03-01" → "01/03/2026".
  *

@@ -3734,6 +3734,35 @@ test("recortar um mês não arrasta o abatimento de outro mês do mesmo doador",
   }
 });
 
+test("o status por doador/mês aceita o mês no formato do campo, sem dia", async () => {
+  const conn = await createTestConnection();
+  try {
+    await runMigrations(conn);
+    await seedDonorMonthStatusFixtures(conn);
+
+    // Escolher o mês no campo da Gestão Mensal manda "2025-01", sem dia. Esse
+    // valor chegava inteiro ao CAST(? AS DATE) e a consulta falhava — as
+    // colunas de crédito real e saldo paravam de atualizar sem aviso.
+    const { sql, params } = buildDonorMonthStatusQuery({
+      referenceMonth: "2025-01",
+    });
+    assert.deepEqual(params, ["2025-01-01", "2025-01-01"]);
+
+    const stmt = await conn.prepare(sql);
+    let linhas;
+    try {
+      linhas = (await stmt.query(...params)).toArray();
+    } finally {
+      await stmt.close();
+    }
+
+    assert.equal(linhas.length, 1);
+    assert.equal(String(linhas[0].donor_id), "donor-a");
+  } finally {
+    await conn.close();
+  }
+});
+
 /**
  * Semeia notas de um mesmo mês em ordem de compra embaralhada, para a
  * numeração ter de ordenar de verdade em vez de devolver a ordem de inserção.

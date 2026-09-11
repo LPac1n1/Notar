@@ -1,6 +1,8 @@
 // Extensão explícita: este módulo é importado direto pela suíte de testes em
 // Node, que (ao contrário do Vite) não resolve import sem extensão.
-import { formatMonthAbbrev } from "../../utils/date.js";
+import { formatMonthAbbrev, formatMonthsSpan } from "../../utils/date.js";
+
+export { formatMonthsSpan };
 
 /**
  * Descrição de cada linha da planilha de abatimento, no formato que o sistema
@@ -8,6 +10,7 @@ import { formatMonthAbbrev } from "../../utils/date.js";
  *
  * Sem auxiliares no grupo:  "Doações NFP - Abr/2026"
  * Com auxiliares no grupo:  "Doações NFP - MARIA SILVA - Abr/2026"
+ * Vários meses pendentes:   "Doações NFP - Jan/2026 e Fev/2026"
  *
  * O nome entra justamente quando o grupo tem mais de uma pessoa doando para o
  * mesmo titular: lá o titular recebe vários lançamentos no mesmo mês e, sem o
@@ -19,9 +22,14 @@ import { formatMonthAbbrev } from "../../utils/date.js";
 export function buildAbatementDescription({
   donorName = "",
   referenceMonth = "",
+  referenceMonths = [],
   groupHasAuxiliaries = false,
 } = {}) {
-  const monthLabel = formatMonthAbbrev(referenceMonth);
+  // Vários meses vêm da planilha de pendentes; um só, da planilha do mês.
+  const monthLabel =
+    referenceMonths.length > 0
+      ? formatMonthsSpan(referenceMonths)
+      : formatMonthAbbrev(referenceMonth);
   const parts = ["Doações NFP"];
 
   if (groupHasAuxiliaries && donorName) {

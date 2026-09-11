@@ -223,7 +223,12 @@ export async function buildAbatementWorkbookBytes({ rows = [], referenceMonth })
     const rowNumber = ABATEMENT_TEMPLATE.headerRow + 1 + index;
 
     const dateCell = sheet.getCell(rowNumber, 1);
-    dateCell.value = abatementDate;
+    // Na planilha de pendentes cada linha junta meses diferentes, então a
+    // data sai do ÚLTIMO mês daquela linha (`row.referenceMonth`). Na planilha
+    // de um mês só, as linhas não trazem mês e todas usam o do arquivo.
+    dateCell.value = row.referenceMonth
+      ? toAbatementDate(row.referenceMonth)
+      : abatementDate;
     dateCell.numFmt = ABATEMENT_TEMPLATE.dateFormat;
 
     // "Quantidade de doações" é o VALOR do modelo — número, não texto, para o

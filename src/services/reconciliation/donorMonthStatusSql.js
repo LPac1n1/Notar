@@ -11,8 +11,22 @@
  * nunca existiu. Omitir o mês devolve o histórico inteiro, que é o que a
  * visão consolidada precisa.
  */
+/**
+ * Primeiro dia do mês, a partir de `AAAA-MM` ou de uma data completa.
+ *
+ * A Gestão Mensal entrega o mês em dois formatos: a âncora automática manda a
+ * data completa (`2026-03-01`), mas escolher o mês no campo manda só
+ * `2026-03`. Recortar só com `slice(0, 10)` passava `2026-03` inteiro para o
+ * `CAST(? AS DATE)` e a consulta falhava — as colunas de crédito real e saldo
+ * paravam de atualizar sem nenhum aviso na tela.
+ */
+function toFirstDayOfMonth(value) {
+  const match = /^(\d{4})-(\d{2})/.exec(String(value ?? ""));
+  return match ? `${match[1]}-${match[2]}-01` : "";
+}
+
 export function buildDonorMonthStatusQuery({ referenceMonth = "" } = {}) {
-  const month = String(referenceMonth ?? "").slice(0, 10);
+  const month = toFirstDayOfMonth(referenceMonth);
 
   const creditScope = month
     ? "AND donation_notes.reference_month = CAST(? AS DATE)"

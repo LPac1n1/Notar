@@ -100,3 +100,75 @@ test("o arquivo baixado tem o cabeçalho do modelo e uma linha por doador", asyn
   // A descrição já sai pronta no texto que o destino espera.
   expect(String(primeira.getCell(3).value)).toContain("Doações NFP");
 });
+
+/**
+ * Sem mês selecionado, o mesmo botão gera a planilha de TODOS os meses
+ * pendentes, somados por CPF.
+ *
+ * A fixture tem janeiro a março para os dois doadores, e nenhum mês marcado —
+ * então tudo está pendente: Alice 8 + 12 + 18 = 38, Bruno 4 + 5 + 3 = 12. A
+ * soma e o "até" só batem se os três meses tiverem entrado na mesma linha.
+ */
+test("sem mês selecionado, a planilha soma os meses pendentes de cada CPF", async ({
+  page,
+}) => {
+  const backupPath = fileURLToPath(
+    new URL("./fixtures/moradia-credit-backup.json", import.meta.url),
+  );
+
+  await page.goto("/p/demandas-de-moradia");
+  await page.getByRole("link", { name: "Configurações" }).click();
+  await page.getByRole("heading", { name: "Cópia de segurança" }).click();
+  await page.locator('input[type="file"]').setInputFiles(backupPath);
+  await page.getByRole("button", { name: "Importar", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Restaurar backup" });
+  await expect(dialog).toBeVisible();
+  await dialog
+    .getByRole("button", { name: "Restaurar backup" })
+    .click({ force: true });
+  await expect(page.getByText("Backup importado:")).toBeVisible({
+    timeout: 120000,
+  });
+
+  await page.getByRole("link", { name: "Gestão Mensal" }).click();
+
+  // A Gestão Mensal abre ancorada no mês mais recente. Desmarcar o card dele
+  // no carrossel é o caminho da interface para "nenhum mês".
+  await page
+    .getByRole("listitem", { name: "Limpar seleção de Março de 2026" })
+    .click();
+
+  const download = page.waitForEvent("download", { timeout: 120000 });
+  await page.getByRole("button", { name: "Planilha dos pendentes" }).click();
+  const arquivo = await download;
+
+  expect(arquivo.suggestedFilename()).toBe(
+    "notar-abatimento-cestas-basicas-pendentes.xlsx",
+  );
+
+  const destino = path.join(os.tmpdir(), "notar-abatimento-pendentes-e2e.xlsx");
+  await arquivo.saveAs(destino);
+
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.readFile(destino);
+  const planilha = workbook.worksheets[0];
+
+  // Mesmo cabeçalho do modelo: é a mesma importação no destino.
+  expect(planilha.getCell("A6").value).toBe("DATA");
+  expect(planilha.getCell("B1").value).toBe(1);
+
+  const alice = planilha.getRow(7);
+  expect(alice.getCell(4).value).toBe("ALICE MORADIA");
+  expect(alice.getCell(2).value).toBe(38);
+  expect(alice.getCell(3).value).toBe("Doações NFP - Jan/2026 até Mar/2026");
+  // A data sai do mês mais recente somado: março lança em 30/06.
+  expect(alice.getCell(1).value.toISOString().slice(0, 10)).toBe("2026-06-30");
+
+  const bruno = planilha.getRow(8);
+  expect(bruno.getCell(4).value).toBe("BRUNO MORADIA");
+  expect(bruno.getCell(2).value).toBe(12);
+  expect(bruno.getCell(3).value).toBe("Doações NFP - Jan/2026 até Mar/2026");
+
+  // Uma linha por CPF, não uma por mês.
+  expect(planilha.getCell(9, 4).value ?? null).toBeNull();
+});

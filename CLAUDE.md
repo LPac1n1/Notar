@@ -635,9 +635,31 @@ Isso satisfez o portão do item "unificar pipelines de importação" — e a uni
 
 **Estado ao fim:** 222 testes unitários/integração, 80 e2e, lint 0 erros, build OK.
 
+## Transferência com demanda e planilha dos pendentes (commit 295)
+
+Quatro pedidos. Dois bugs reais reproduzidos em e2e antes de corrigir, e uma regressão minha do commit 280.
+
+- **Doador transferido não aparecia na Gestão Mensal do destino** — duas causas somadas:
+  1. O mês padrão do modal era o do calendário. A planilha da NFP chega meses depois, então o mês corrente quase nunca tem nota: a transferência passava e nenhuma doação mudava de projeto. A sugestão agora é o primeiro mês com doação dentro do vínculo atual (`listDonorDonationMonths`, sobre `import_cpf_summary` de importações processadas), sempre posterior ao início do vínculo (o serviço recusa o contrário). O modal diz, antes de confirmar, o que passa e o que fica ("Passam para X: 2 meses com doação (Mar/2026 e Abr/2026).").
+  2. A Gestão Mensal lê a demanda da CÓPIA gravada em `monthly_donor_summary` na reconciliação, não da ficha. Mesmo acertando o mês, o doador aparecia como "Demanda: Não informada". A transferência agora reconcilia os CPFs do doador depois de gravar a demanda.
+- **Demanda obrigatória ao transferir para projeto com demandas**: `resolveDestinationDemand` exige demanda ativa DO DESTINO quando `modules.demands !== false` e grava `donors.demand` na mesma transação. Destino sem demandas mantém a demanda como está — os meses que ficam no projeto de origem ainda a exibem. Vale nos dois caminhos do modal: transferência e vínculo de quem não tem vínculo (novo `assignUnlinkedDonorToProject`; `assignDonorToProject` segue sendo o do cadastro, que roda dentro da transação do `createDonor`). `listProjectDemands(projectId)` existe porque `listDemands` é sempre do projeto ativo, e o destino por definição não é. Destino sem demanda cadastrada bloqueia o botão com instrução. O card de órfãos da tela de Projetos (`linkDonorToProject`) não mudou.
+- **Bug latente nas opções de transação**: a transferência passava `{ source, domains }` para `runInTransaction`, que lê `{ changeSource, changeDomains }`. As opções eram ignoradas em silêncio e o evento saía como `"transaction"`, sem domínio.
+- **Planilha dos pendentes**: sem mês selecionado, o botão vira "Planilha dos pendentes" e gera uma linha por CPF com todos os meses pendentes somados (VALOR = soma das notas).
+  - Regra de pendente = a do contador da visão por mês: `pending`, com nota, e nenhum acumulado de OUTRO mês cobrindo. Sem a exclusão do acumulado o destino abateria a mesma doação duas vezes — verificado por mutação (o teste falha com a cláusula removida).
+  - O status é por doador e a linha é por CPF: o casamento é `monthly_donor_summary.donor_id = donors.id` (dono do vínculo de CPF) no mesmo mês.
+  - Descrição por `formatMonthsSpan` (movido para `utils/date.js`): dois meses "Jan/2026 e Fev/2026"; três ou mais seguidos "Jan/2026 até Mar/2026"; com buraco nunca "até" ("Jan/2026, Mar/2026 e Abr/2026"). Virada de ano conta como seguida — comparação por índice absoluto de mês.
+  - DATA sai do mês mais recente DE CADA LINHA (`row.referenceMonth`, lido pelo workbook), não de um mês do arquivo: dois CPFs da mesma planilha podem ter conjuntos diferentes. Arquivo com sufixo `-pendentes`, um por demanda.
+  - Colunas, junções e agrupamento viraram constantes compartilhadas com a planilha do mês em `abatementSheetSql.js` — duas cópias da identidade do titular divergiriam na primeira correção.
+  - Exportar não marca nada como realizado, igual à planilha do mês.
+- **JPEG sem "Valor abatido"**: não reproduzido. PDF e JPEG usam o mesmo `drawDonationReport`, e o JPEG gerado pelo app mostra a coluna — o provável é versão antiga em cache no navegador.
+- **Regressão do commit 280**: `buildDonorMonthStatusQuery` recortava com `slice(0, 10)`, e escolher o mês no campo manda `2026-03`, sem dia — o `CAST(? AS DATE)` falhava e crédito real/saldo paravam de atualizar sem aviso. `toFirstDayOfMonth` + teste que falha com o recorte antigo.
+- **Fixture `project-credit-backup.json`**: ganhou a demanda de Moradia e o `importCpfSummary`, que estava vazio. O restore NÃO deriva essa tabela das notas — sem ela não há resumo mensal nem mês com doação para sugerir.
+- Armadilha de e2e: ao trocar de mês na Gestão Mensal, a linha do mês anterior do mesmo doador coexiste por um instante com a do novo, e `toBeVisible` num botão pelo nome dá violação de modo estrito. Esperar `toHaveCount(1)` — que também pega resumo duplicado.
+- 249 testes (14 novos), 90 e2e (3 novos), lint 0 erros, build OK. Na rodada completa 7 e2e de outras áreas estouraram tempo — lint e build rodavam em paralelo na mesma máquina —, e os 7 passaram rodados de novo sem essa carga. Não rodar lint/build junto da suíte e2e.
+
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 288**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 295**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

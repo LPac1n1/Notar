@@ -84,6 +84,33 @@ async function _listDemandsUncached(filters = {}) {
   }));
 }
 
+/**
+ * Demandas ativas de um projeto específico, que não precisa ser o aberto.
+ *
+ * `listDemands` é sempre do projeto ativo — é o que impede oferecer a um
+ * doador a demanda de outro projeto. A transferência é o único lugar em que a
+ * pergunta é sobre o projeto de DESTINO, que por definição não é o que está
+ * aberto. Sem cache: é chamada uma vez, ao escolher o destino no modal.
+ */
+export async function listProjectDemands(projectId) {
+  if (!projectId) {
+    return [];
+  }
+
+  const rows = await queryPrepared(
+    `
+      SELECT id, name
+      FROM demands
+      WHERE project_id = ?
+        AND is_active = TRUE
+      ORDER BY name ASC
+    `,
+    [projectId],
+  );
+
+  return rows.map((row) => ({ id: row.id, name: row.name }));
+}
+
 export const listDemands = withCache(
   // A chave PRECISA cobrir todo filtro que muda o resultado. Com só o
   // `demandId`, buscas de texto diferentes colidiriam na mesma entrada e

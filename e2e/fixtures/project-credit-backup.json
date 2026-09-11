@@ -62,7 +62,17 @@
         "created_at": "2026-05-01 10:00:00"
       }
     ],
-    "demands": [],
+    "demands": [
+      {
+        "id": "dem-moradia-cestas",
+        "project_id": "prj-demandas-moradia",
+        "name": "CESTAS BASICAS",
+        "color": "#4f46e5",
+        "is_active": true,
+        "created_at": "2026-05-01 10:00:00",
+        "updated_at": "2026-05-01 10:00:00"
+      }
+    ],
     "people": [],
     "donors": [
       {
@@ -218,7 +228,18 @@
         "updated_at": "2026-05-01 10:00:00"
       }
     ],
-    "importCpfSummary": [],
+    "importCpfSummary": [
+      { "id": "ics-a-01", "import_id": "imp-2026-01-01", "reference_month": "2026-01-01", "cpf": "11144477735", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-a", "matched_source_id": "lk-0", "is_registered_donor": true },
+      { "id": "ics-a-02", "import_id": "imp-2026-02-01", "reference_month": "2026-02-01", "cpf": "11144477735", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-a", "matched_source_id": "lk-0", "is_registered_donor": true },
+      { "id": "ics-a-03", "import_id": "imp-2026-03-01", "reference_month": "2026-03-01", "cpf": "11144477735", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-a", "matched_source_id": "lk-0", "is_registered_donor": true },
+      { "id": "ics-a-04", "import_id": "imp-2026-04-01", "reference_month": "2026-04-01", "cpf": "11144477735", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-a", "matched_source_id": "lk-0", "is_registered_donor": true },
+      { "id": "ics-b-01", "import_id": "imp-2026-01-01", "reference_month": "2026-01-01", "cpf": "22233344456", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-b", "matched_source_id": "lk-1", "is_registered_donor": true },
+      { "id": "ics-b-02", "import_id": "imp-2026-02-01", "reference_month": "2026-02-01", "cpf": "22233344456", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-b", "matched_source_id": "lk-1", "is_registered_donor": true },
+      { "id": "ics-b-03", "import_id": "imp-2026-03-01", "reference_month": "2026-03-01", "cpf": "22233344456", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-b", "matched_source_id": "lk-1", "is_registered_donor": true },
+      { "id": "ics-b-04", "import_id": "imp-2026-04-01", "reference_month": "2026-04-01", "cpf": "22233344456", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-b", "matched_source_id": "lk-1", "is_registered_donor": true },
+      { "id": "ics-c-03", "import_id": "imp-2026-03-01", "reference_month": "2026-03-01", "cpf": "15350946056", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-c", "matched_source_id": "lk-2", "is_registered_donor": true },
+      { "id": "ics-c-04", "import_id": "imp-2026-04-01", "reference_month": "2026-04-01", "cpf": "15350946056", "notes_count": 1, "invalid_notes_count": 0, "matched_donor_id": "dn-c", "matched_source_id": "lk-2", "is_registered_donor": true }
+    ],
     "donationNotes": [
       {
         "id": "dnote-1",

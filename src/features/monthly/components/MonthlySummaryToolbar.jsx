@@ -22,6 +22,7 @@ export default function MonthlySummaryToolbar({
   isExportingReconciliation,
   isExportingAbatementSheet,
   isPdfDisabled,
+  hasSelectedReferenceMonth = true,
 }) {
   return (
     <div className="mb-5 grid gap-4">
@@ -61,9 +62,17 @@ export default function MonthlySummaryToolbar({
             isLoading={isExportingAbatementSheet}
             loadingLabel="Gerando planilha..."
             leftIcon={<DownloadIcon className="h-4 w-4" />}
-            title="Planilha .xlsx por CPF, no formato que o sistema de abatimento importa. Sai uma por demanda. Exige um mês selecionado."
+            title={
+              hasSelectedReferenceMonth
+                ? "Planilha .xlsx por CPF do mês selecionado, no formato que o sistema de abatimento importa. Sai uma por demanda."
+                : "Sem mês selecionado: planilha .xlsx com todos os meses ainda pendentes, somados por CPF. A descrição de cada linha nomeia os meses. Sai uma por demanda."
+            }
           >
-            Planilha de abatimento
+            {/* O rótulo muda junto com o que o botão gera: sem mês, a planilha
+                não é "do mês" e sim de tudo que está pendente. */}
+            {hasSelectedReferenceMonth
+              ? "Planilha de abatimento"
+              : "Planilha dos pendentes"}
           </Button>
         ) : null}
         <Button

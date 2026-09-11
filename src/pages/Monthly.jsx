@@ -672,6 +672,7 @@ export default function Monthly() {
           isExportingReconciliation={isExportingReconciliation}
           isExportingAbatementSheet={isExportingAbatementSheet}
           isPdfDisabled={summaries.length === 0}
+          hasSelectedReferenceMonth={hasSelectedReferenceMonth}
         />
 
         {selectedImport ? (

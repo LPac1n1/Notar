@@ -320,3 +320,34 @@ test("sem identidade de planilha, a linha vale por si", async () => {
   assert.equal(linha.getCell(4).value, "ANA MARIA DE SOUZA");
   assert.equal(linha.getCell(5).value, "529.982.247-25");
 });
+
+test("na planilha de pendentes, cada linha tira a data do próprio mês mais recente", async () => {
+  // Não existe "mês do arquivo" quando a planilha soma pendências: um CPF pode
+  // estar devendo janeiro e fevereiro, outro janeiro a março. Uma data única
+  // para o arquivo inteiro daria a um deles a chave única do outro ciclo.
+  const gerado = await gerar({
+    referenceMonth: undefined,
+    rows: [
+      {
+        cpf: "529.982.247-25",
+        donorName: "ANA MARIA DE SOUZA",
+        notesCount: 20,
+        description: "Doações NFP - Jan/2026 e Fev/2026",
+        referenceMonth: "2026-02-01",
+      },
+      {
+        cpf: "011.444.777-35",
+        donorName: "BRUNO SILVA",
+        notesCount: 9,
+        description: "Doações NFP - Jan/2026 até Mar/2026",
+        referenceMonth: "2026-03-01",
+      },
+    ],
+  });
+
+  // Fevereiro lança em 31/05; março, em 30/06.
+  assert.equal(gerado.getCell(7, 1).value.toISOString().slice(0, 10), "2026-05-31");
+  assert.equal(gerado.getCell(8, 1).value.toISOString().slice(0, 10), "2026-06-30");
+  assert.equal(gerado.getCell(7, 2).value, 20);
+  assert.equal(gerado.getCell(8, 3).value, "Doações NFP - Jan/2026 até Mar/2026");
+});
