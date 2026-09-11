@@ -81,9 +81,13 @@ export default function Monthly() {
   // when filters change or after a successful bulk apply so the operator
   // doesn't accidentally re-act on stale rows.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
-  const [showBulkAbatementModal, setShowBulkAbatementModal] = useState(false);
+  // Qual modal em massa está aberto: "applied" (abater), "pending"
+  // (desabater) ou nenhum. É o status que o modal vai GRAVAR.
+  const [bulkModalStatus, setBulkModalStatus] = useState("");
   const [catchUpDonor, setCatchUpDonor] = useState(null);
-  const [isBulkAbating, setIsBulkAbating] = useState(false);
+  // Status sendo gravado em massa agora ("" quando nada). Um booleano só não
+  // diria qual dos dois botões deve mostrar "carregando".
+  const [bulkStatusInProgress, setBulkStatusInProgress] = useState("");
   const [isFiltersExpanded, setIsFiltersExpanded] = useState(true);
   const [successMessage, setSuccessMessage] = useState("");
   const [successAction, setSuccessAction] = useState(null);
@@ -133,20 +137,24 @@ export default function Monthly() {
     });
   }, [rawSummaries, optimisticStatusOverrides]);
 
-  const { handleBulkAbate, handleConsolidatedDonorStatusChange, handleStatusChange } =
-    useMonthlyStatusHandlers({
-      setError,
-      setSuccessMessage,
-      setSuccessAction,
-      setUpdatingDonorId,
-      setUpdatingSummaryId,
-      reload: reloadSummaries,
-      summaries,
-      rawSummaries,
-      setOptimisticStatusOverrides,
-      setIsBulkAbating,
-      onBulkAbateSuccess: () => setShowBulkAbatementModal(false),
-    });
+  const {
+    handleBulkAbate,
+    handleBulkUnabate,
+    handleConsolidatedDonorStatusChange,
+    handleStatusChange,
+  } = useMonthlyStatusHandlers({
+    setError,
+    setSuccessMessage,
+    setSuccessAction,
+    setUpdatingDonorId,
+    setUpdatingSummaryId,
+    reload: reloadSummaries,
+    summaries,
+    rawSummaries,
+    setOptimisticStatusOverrides,
+    setBulkStatusInProgress,
+    onBulkStatusSuccess: () => setBulkModalStatus(""),
+  });
 
   const [reconciliationByDonor, setReconciliationByDonor] = useState(new Map());
   const [inactivityByDonor, setInactivityByDonor] = useState(new Map());
@@ -353,6 +361,25 @@ export default function Monthly() {
     await handleBulkAbate(eligibleBulkSummaries.map((summary) => summary.id));
     setSelectedIds(new Set());
   }, [eligibleBulkSummaries, handleBulkAbate]);
+
+  // Desabater pega o recorte oposto: selecionadas, editáveis e já realizadas.
+  const revertibleBulkSummaries = useMemo(() => {
+    if (selectedIds.size === 0 || !summaries) return [];
+    return summaries.filter(
+      (summary) =>
+        selectedIds.has(summary.id) &&
+        summary.canUpdateAbatement &&
+        summary.abatementStatus === "applied",
+    );
+  }, [summaries, selectedIds]);
+
+  const handleRevertBulkSelection = useCallback(async () => {
+    if (revertibleBulkSummaries.length === 0) return;
+    await handleBulkUnabate(
+      revertibleBulkSummaries.map((summary) => summary.id),
+    );
+    setSelectedIds(new Set());
+  }, [revertibleBulkSummaries, handleBulkUnabate]);
   const isNotDonatedFilterActive =
     hasSelectedReferenceMonth && filters.donationActivity === "not-donated";
   const activeFilterCount = [
@@ -658,7 +685,8 @@ export default function Monthly() {
 
         <MonthlySummaryToolbar
           metrics={overviewMetrics}
-          onBulkAbate={() => setShowBulkAbatementModal(true)}
+          onBulkAbate={() => setBulkModalStatus("applied")}
+          onBulkUnabate={() => setBulkModalStatus("pending")}
           onClearRefinements={handleClearRefinements}
           onExportCsv={handleExport}
           onExportPdf={handleExportPdf}
@@ -666,6 +694,7 @@ export default function Monthly() {
           onExportReconciliationCsv={handleExportReconciliationCsv}
           onExportAbatementSheet={handleExportAbatementSheet}
           isBulkAbateDisabled={summaries.length === 0}
+          isBulkUnabateDisabled={summaries.length === 0}
           isExportingCsv={isExporting}
           isExportingPdf={isExportingPdf}
           isExportingJpeg={isExportingJpeg}
@@ -752,9 +781,12 @@ export default function Monthly() {
             <BulkActionBar
               selectedCount={selectedIds.size}
               eligibleCount={eligibleBulkSummaries.length}
+              revertibleCount={revertibleBulkSummaries.length}
               onApplyBulk={handleApplyBulkSelection}
+              onRevertBulk={handleRevertBulkSelection}
               onClear={handleClearSelection}
-              isApplying={isBulkAbating}
+              isApplying={bulkStatusInProgress === "applied"}
+              isReverting={bulkStatusInProgress === "pending"}
             />
             <MonthlySummaryList
               pagination={monthlyPagination}
@@ -774,12 +806,18 @@ export default function Monthly() {
         )}
       </SectionCard>
 
-      {showBulkAbatementModal ? (
+      {/* A chave troca o modal inteiro ao mudar de sentido: os meses marcados
+          no modal de abater não podem vazar para o de desabater. */}
+      {bulkModalStatus ? (
         <BulkAbatementModal
+          key={bulkModalStatus}
+          status={bulkModalStatus}
           summaries={summaries}
-          onApply={handleBulkAbate}
-          onClose={() => setShowBulkAbatementModal(false)}
-          isApplying={isBulkAbating}
+          onApply={
+            bulkModalStatus === "applied" ? handleBulkAbate : handleBulkUnabate
+          }
+          onClose={() => setBulkModalStatus("")}
+          isApplying={bulkStatusInProgress === bulkModalStatus}
         />
       ) : null}
 

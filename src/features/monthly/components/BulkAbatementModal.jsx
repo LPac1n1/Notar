@@ -5,16 +5,68 @@ import { CheckIcon, MonthlyIcon } from "../../../components/ui/icons";
 import { formatMonthYear } from "../../../utils/date";
 import { formatCurrency, formatInteger } from "../../../utils/format";
 
-function buildMonthGroups(summaries) {
-  const pending = summaries.filter(
+/**
+ * Os dois sentidos da operação em massa. A chave é o status que o modal
+ * GRAVA: "applied" abate as linhas pendentes, "pending" desabate as
+ * realizadas.
+ *
+ * O tom acompanha o status de destino, com as cores do seletor de cada linha
+ * (verde para realizado, âmbar para pendente): o operador reconhece pela cor o
+ * que vai acontecer antes de ler o botão.
+ */
+const MODES = {
+  applied: {
+    sourceStatus: "pending",
+    title: "Abatimento em massa",
+    description:
+      "Selecione os meses que serão marcados como realizados para todos os doadores com doação pendente.",
+    emptyDescription:
+      "Nenhum abatimento pendente encontrado para os filtros atuais.",
+    selectAllLabel: "Abater todas as doações pendentes",
+    confirmLabel: "Abater",
+    loadingLabel: "Abatendo...",
+    confirmVariant: "primary",
+    selectedRow: "border-[var(--success-line)] bg-[color:var(--success-soft)]",
+    selectedBox: "border-[var(--success)] bg-[var(--success)]",
+    summary:
+      "border-[var(--success-line)] bg-[color:var(--success-soft)] text-[var(--success)]",
+  },
+  pending: {
+    sourceStatus: "applied",
+    title: "Desabatimento em massa",
+    description:
+      "Selecione os meses cujos abatimentos realizados voltarão a ficar pendentes para os doadores filtrados.",
+    emptyDescription:
+      "Nenhum abatimento realizado encontrado para os filtros atuais.",
+    selectAllLabel: "Desabater todos os abatimentos realizados",
+    confirmLabel: "Desabater",
+    loadingLabel: "Desabatendo...",
+    confirmVariant: "danger",
+    selectedRow: "border-[var(--warning-line)] bg-[color:var(--warning-soft)]",
+    selectedBox: "border-[var(--warning)] bg-[var(--warning)]",
+    summary:
+      "border-[var(--warning-line)] bg-[color:var(--warning-soft)] text-[var(--warning)]",
+  },
+};
+
+/**
+ * Agrupa por mês as linhas que o modal pode mudar.
+ *
+ * Linhas "Via acumulado" (`isSubsumed`) ficam de fora nos dois sentidos: o
+ * status delas pertence ao mês em que o acumulado foi lançado. O serviço
+ * também as recusa — o filtro aqui é para a contagem mostrada bater com o que
+ * de fato muda.
+ */
+function buildMonthGroups(summaries, sourceStatus) {
+  const eligible = summaries.filter(
     (s) =>
       s.hasDonationsInMonth &&
-      s.abatementStatus === "pending" &&
+      s.abatementStatus === sourceStatus &&
       !s.isSubsumed,
   );
   const byMonth = new Map();
 
-  for (const summary of pending) {
+  for (const summary of eligible) {
     const key = summary.referenceMonth;
     const group = byMonth.get(key) ?? {
       referenceMonth: key,
@@ -34,22 +86,20 @@ function buildMonthGroups(summaries) {
     .sort((a, b) => b.referenceMonth.localeCompare(a.referenceMonth));
 }
 
-function MonthRow({ group, isSelected, onToggle }) {
+function MonthRow({ group, isSelected, mode, onToggle }) {
   return (
     <button
       type="button"
       onClick={() => onToggle(group.referenceMonth)}
       className={`flex w-full items-center gap-3 rounded-md border p-3 text-left transition ${
         isSelected
-          ? "border-[var(--success-line)] bg-[color:var(--success-soft)]"
+          ? mode.selectedRow
           : "border-[var(--line)] bg-[var(--surface-elevated)] hover:border-[var(--line-strong)]"
       }`}
     >
       <div
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
-          isSelected
-            ? "border-[var(--success)] bg-[var(--success)]"
-            : "border-[var(--line-strong)] bg-transparent"
+          isSelected ? mode.selectedBox : "border-[var(--line-strong)] bg-transparent"
         }`}
       >
         {isSelected ? (
@@ -69,21 +119,21 @@ function MonthRow({ group, isSelected, onToggle }) {
   );
 }
 
-function SelectAllRow({ allSelected, someSelected, onToggle }) {
+function SelectAllRow({ allSelected, someSelected, mode, onToggle }) {
   return (
     <button
       type="button"
       onClick={onToggle}
       className={`flex w-full items-center gap-3 rounded-md border p-3 text-left transition ${
         allSelected
-          ? "border-[var(--success-line)] bg-[color:var(--success-soft)]"
+          ? mode.selectedRow
           : "border-[var(--line)] bg-[var(--surface-strong)] hover:border-[var(--line-strong)]"
       }`}
     >
       <div
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
           allSelected
-            ? "border-[var(--success)] bg-[var(--success)]"
+            ? mode.selectedBox
             : someSelected
               ? "border-[var(--line-strong)] bg-[var(--line-strong)]"
               : "border-[var(--line-strong)] bg-transparent"
@@ -96,14 +146,24 @@ function SelectAllRow({ allSelected, someSelected, onToggle }) {
         ) : null}
       </div>
       <span className="font-semibold text-[var(--text-main)]">
-        Abater todas as doações pendentes
+        {mode.selectAllLabel}
       </span>
     </button>
   );
 }
 
-export default function BulkAbatementModal({ summaries, onApply, onClose, isApplying }) {
-  const monthGroups = useMemo(() => buildMonthGroups(summaries), [summaries]);
+export default function BulkAbatementModal({
+  status = "applied",
+  summaries,
+  onApply,
+  onClose,
+  isApplying,
+}) {
+  const mode = MODES[status] ?? MODES.applied;
+  const monthGroups = useMemo(
+    () => buildMonthGroups(summaries, mode.sourceStatus),
+    [summaries, mode.sourceStatus],
+  );
   const [selectedMonths, setSelectedMonths] = useState(() => new Set());
 
   const allSelected =
@@ -142,8 +202,8 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
   if (monthGroups.length === 0) {
     return (
       <Modal
-        title="Abatimento em massa"
-        description="Nenhum abatimento pendente encontrado para os filtros atuais."
+        title={mode.title}
+        description={mode.emptyDescription}
         icon={<MonthlyIcon className="h-5 w-5" />}
         onClose={onClose}
         size="sm"
@@ -159,8 +219,8 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
 
   return (
     <Modal
-      title="Abatimento em massa"
-      description="Selecione os meses que serão marcados como realizados para todos os doadores com doação pendente."
+      title={mode.title}
+      description={mode.description}
       icon={<MonthlyIcon className="h-5 w-5" />}
       onClose={onClose}
       size="md"
@@ -169,6 +229,7 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
         <SelectAllRow
           allSelected={allSelected}
           someSelected={someSelected}
+          mode={mode}
           onToggle={toggleAll}
         />
 
@@ -178,6 +239,7 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
               key={group.referenceMonth}
               group={group}
               isSelected={selectedMonths.has(group.referenceMonth)}
+              mode={mode}
               onToggle={toggleMonth}
             />
           ))}
@@ -185,7 +247,7 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
       </div>
 
       {selectedSummaryIds.length > 0 ? (
-        <div className="mt-4 rounded-md border border-[var(--success-line)] bg-[color:var(--success-soft)] px-4 py-3 text-sm text-[var(--success)]">
+        <div className={`mt-4 rounded-md border px-4 py-3 text-sm ${mode.summary}`}>
           <span className="font-semibold">
             {formatInteger(selectedMonths.size)} mês(es) selecionado(s)
           </span>
@@ -201,13 +263,14 @@ export default function BulkAbatementModal({ summaries, onApply, onClose, isAppl
           Cancelar
         </Button>
         <Button
-          variant="primary"
+          variant={mode.confirmVariant}
           onClick={() => onApply(selectedSummaryIds)}
           disabled={selectedSummaryIds.length === 0 || isApplying}
           isLoading={isApplying}
-          loadingLabel="Abatendo..."
+          loadingLabel={mode.loadingLabel}
         >
-          Abater {selectedSummaryIds.length > 0
+          {mode.confirmLabel}{" "}
+          {selectedSummaryIds.length > 0
             ? formatInteger(selectedSummaryIds.length)
             : ""}{" "}
           selecionado(s)

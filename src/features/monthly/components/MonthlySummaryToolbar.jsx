@@ -3,12 +3,14 @@ import {
   CheckIcon,
   DownloadIcon,
   FileIcon,
+  HistoryIcon,
 } from "../../../components/ui/icons";
 import OverviewMetric from "./OverviewMetric";
 
 export default function MonthlySummaryToolbar({
   metrics,
   onBulkAbate,
+  onBulkUnabate,
   onClearRefinements,
   onExportCsv,
   onExportPdf,
@@ -16,6 +18,7 @@ export default function MonthlySummaryToolbar({
   onExportReconciliationCsv,
   onExportAbatementSheet,
   isBulkAbateDisabled,
+  isBulkUnabateDisabled,
   isExportingCsv,
   isExportingPdf,
   isExportingJpeg,
@@ -48,6 +51,17 @@ export default function MonthlySummaryToolbar({
         >
           Abater em massa
         </Button>
+        {onBulkUnabate ? (
+          <Button
+            variant="subtle"
+            onClick={onBulkUnabate}
+            disabled={isBulkUnabateDisabled}
+            leftIcon={<HistoryIcon className="h-4 w-4" />}
+            title="Volta para pendente os abatimentos já realizados dos meses que você escolher."
+          >
+            Desabater em massa
+          </Button>
+        ) : null}
         <Button
           variant="subtle"
           onClick={onClearRefinements}

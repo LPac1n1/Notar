@@ -19,8 +19,8 @@ export function useMonthlyStatusHandlers({
   summaries,
   rawSummaries,
   setOptimisticStatusOverrides,
-  setIsBulkAbating,
-  onBulkAbateSuccess,
+  setBulkStatusInProgress,
+  onBulkStatusSuccess,
 }) {
   const runStatusChangeAction = useStatusChangeAction({
     setError,
@@ -241,12 +241,32 @@ export function useMonthlyStatusHandlers({
     [handleUndoStatusChanges, runStatusChangeAction, setOptimisticStatusOverrides],
   );
 
-  const handleBulkAbate = useCallback(
-    async (summaryIds) => {
-      if (summaryIds.length === 0) {
+  /**
+   * Abater ou desabater várias linhas de uma vez.
+   *
+   * As duas direções são a mesma operação com o status invertido. A cascata
+   * para o acumulado do mês e a proteção das linhas "Via acumulado" moram no
+   * serviço e valem igual para as duas; o que muda aqui é o texto e o status
+   * que o "Desfazer" restaura.
+   *
+   * `setBulkStatusInProgress` recebe o status em andamento (e "" ao terminar)
+   * para a página saber QUAL botão mostra "carregando" — com um booleano só,
+   * "Abatendo..." apareceria também no botão de desabater.
+   *
+   * O "Desfazer" devolve cada linha ao status anterior, mas não a data em que
+   * o abatimento tinha sido marcado: desabater apaga essa data, e marcar de
+   * novo grava a de agora. É o mesmo comportamento do desfazer de uma linha.
+   */
+  const handleBulkStatusChange = useCallback(
+    async (summaryIds, status) => {
+      if (
+        summaryIds.length === 0 ||
+        (status !== "applied" && status !== "pending")
+      ) {
         return;
       }
 
+      const isRevert = status === "pending";
       const affectedSummaries = rawSummaries.filter((s) =>
         summaryIds.includes(s.id),
       );
@@ -254,22 +274,31 @@ export function useMonthlyStatusHandlers({
         (sum, s) => sum + Number(s.abatementAmount ?? 0),
         0,
       );
-      const affectedAdjustmentIds = affectedSummaries
-        .map((s) => s.adjustment?.id ?? "")
-        .filter(Boolean);
+      const adjustmentIdBySummaryId = new Map(
+        affectedSummaries.map((s) => [s.id, s.adjustment?.id ?? ""]),
+      );
+      const affectedAdjustmentIds = Array.from(
+        adjustmentIdBySummaryId.values(),
+      ).filter(Boolean);
       const previousStatusBySummaryId = new Map(
         affectedSummaries.map((s) => [s.id, s.abatementStatus]),
       );
+      const donorCount = new Set(affectedSummaries.map((s) => s.donorId)).size;
+      const countLabel = formatInteger(summaryIds.length);
+      const restoredStatus = isRevert ? "applied" : "pending";
       const optimisticMarker = new Date().toISOString();
 
       const success = await runStatusChangeAction({
-        scope: "MonthlyPage.bulkAbate",
-        setBusy: setIsBulkAbating,
+        scope: isRevert ? "MonthlyPage.bulkUnabate" : "MonthlyPage.bulkAbate",
+        setBusy: (busy) => setBulkStatusInProgress?.(busy ? status : ""),
         onStart: () => {
           setOptimisticStatusOverrides((current) => {
             const next = { ...current };
             for (const id of summaryIds) {
-              next[id] = { abatementStatus: "applied", abatementMarkedAt: optimisticMarker };
+              next[id] = {
+                abatementStatus: status,
+                abatementMarkedAt: isRevert ? "" : optimisticMarker,
+              };
             }
             return next;
           });
@@ -280,50 +309,90 @@ export function useMonthlyStatusHandlers({
               actionType: "monthly_abatement_status_update",
               entityType: "monthly_abatement",
               entityId: "bulk",
-              label: "Abatimento em massa",
-              description: `${formatInteger(summaryIds.length)} abatimento(s) marcado(s) como realizado.`,
+              label: isRevert ? "Desabatimento em massa" : "Abatimento em massa",
+              description: `${countLabel} abatimento(s) marcado(s) como ${isRevert ? "pendente" : "realizado"}.`,
               payload: {
                 summaryIds,
                 adjustmentIds: affectedAdjustmentIds,
-                donorCount: new Set(affectedSummaries.map((s) => s.donorId)).size,
+                donorCount,
                 totalAmount,
-                operation: "bulk",
+                operation: isRevert ? "bulk-revert" : "bulk",
               },
             },
-            status: "applied",
+            status,
             summaryIds,
             adjustmentIds: affectedAdjustmentIds,
           }),
-        successMessage: `${formatInteger(summaryIds.length)} abatimento(s) realizado(s) — ${formatCurrency(totalAmount)} total.`,
-        errorMessage: "Não foi possível realizar o abatimento em massa.",
+        successMessage: isRevert
+          ? `${countLabel} abatimento(s) voltaram a pendente — ${formatCurrency(totalAmount)} total.`
+          : `${countLabel} abatimento(s) realizado(s) — ${formatCurrency(totalAmount)} total.`,
+        errorMessage: isRevert
+          ? "Não foi possível desabater em massa."
+          : "Não foi possível realizar o abatimento em massa.",
         onError: () => {
           setOptimisticStatusOverrides((current) => {
             const next = { ...current };
             for (const id of summaryIds) {
               next[id] = {
-                abatementStatus: previousStatusBySummaryId.get(id) ?? "pending",
+                abatementStatus:
+                  previousStatusBySummaryId.get(id) ?? restoredStatus,
               };
             }
             return next;
           });
         },
+        undo: () =>
+          handleUndoStatusChanges({
+            changes: summaryIds.map((summaryId) => ({
+              summaryId,
+              adjustmentId: adjustmentIdBySummaryId.get(summaryId) ?? "",
+              status: previousStatusBySummaryId.get(summaryId) ?? restoredStatus,
+            })),
+            history: {
+              actionType: "monthly_abatement_status_undo",
+              entityType: "monthly_abatement",
+              entityId: "bulk",
+              label: isRevert
+                ? "Desabatimento em massa desfeito"
+                : "Abatimento em massa desfeito",
+              description: `${countLabel} abatimento(s) restaurado(s) como ${isRevert ? "realizado" : "pendente"}.`,
+              payload: {
+                summaryIds,
+                adjustmentIds: affectedAdjustmentIds,
+                operation: "undo",
+              },
+            },
+            message: `${countLabel} abatimento(s) restaurado(s) como ${isRevert ? "realizado(s)" : "pendente(s)"}.`,
+          }),
       });
 
       if (success) {
-        onBulkAbateSuccess?.();
+        onBulkStatusSuccess?.();
       }
     },
     [
-      onBulkAbateSuccess,
+      handleUndoStatusChanges,
+      onBulkStatusSuccess,
       rawSummaries,
       runStatusChangeAction,
-      setIsBulkAbating,
+      setBulkStatusInProgress,
       setOptimisticStatusOverrides,
     ],
   );
 
+  const handleBulkAbate = useCallback(
+    (summaryIds) => handleBulkStatusChange(summaryIds, "applied"),
+    [handleBulkStatusChange],
+  );
+
+  const handleBulkUnabate = useCallback(
+    (summaryIds) => handleBulkStatusChange(summaryIds, "pending"),
+    [handleBulkStatusChange],
+  );
+
   return {
     handleBulkAbate,
+    handleBulkUnabate,
     handleConsolidatedDonorStatusChange,
     handleStatusChange,
   };

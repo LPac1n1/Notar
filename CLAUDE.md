@@ -657,9 +657,20 @@ Quatro pedidos. Dois bugs reais reproduzidos em e2e antes de corrigir, e uma reg
 - Armadilha de e2e: ao trocar de mês na Gestão Mensal, a linha do mês anterior do mesmo doador coexiste por um instante com a do novo, e `toBeVisible` num botão pelo nome dá violação de modo estrito. Esperar `toHaveCount(1)` — que também pega resumo duplicado.
 - 249 testes (14 novos), 90 e2e (3 novos), lint 0 erros, build OK. Na rodada completa 7 e2e de outras áreas estouraram tempo — lint e build rodavam em paralelo na mesma máquina —, e os 7 passaram rodados de novo sem essa carga. Não rodar lint/build junto da suíte e2e.
 
+## Desabater em massa (commit 297)
+
+- Botão "Desabater em massa" ao lado de "Abater em massa". Abre o mesmo modal por mês, agora parametrizado por `status` — o status que ele GRAVA. No sentido de desabater lista os meses com abatimento realizado, em tom âmbar (o mesmo de "Pendente" no seletor de cada linha), e confirma com botão vermelho.
+- Nenhuma mudança no serviço: `updateAbatementStatuses` já aceitava `pending` em massa, com a cascata para o acumulado do mês e a recusa das linhas "Via acumulado". O handler virou `handleBulkStatusChange(ids, status)`; `handleBulkAbate` e `handleBulkUnabate` são os dois sentidos.
+- A barra de seleção por linha ganhou "Desabater N realizado(s)". Antes, selecionar só linhas realizadas era beco sem saída: botão desabilitado e "nenhuma pendente".
+- "Desfazer" nas operações em massa, nos dois sentidos (o abatimento em massa não tinha). Restaura o status, não a data em que o abatimento tinha sido marcado — desabater apaga essa data, igual ao desfazer de uma linha.
+- Estado da página: `bulkModalStatus` ("" | "applied" | "pending") no lugar do booleano do modal, e `bulkStatusInProgress` no lugar de `isBulkAbating` — com um booleano só, "Abatendo..." apareceria no botão de desabater. O modal recebe `key={bulkModalStatus}` para os meses marcados num sentido não vazarem para o outro.
+- e2e `monthly-bulk-unabate.spec.js` (2 testes): abate março em massa, desabate e confere pelo ESTADO (modal de desabater vazio, março de volta no de abater), não só pela mensagem; e o "Desfazer".
+- Armadilhas de e2e: a busca de papel por nome é por TRECHO — "Abater em massa" casa com "Desabater em massa" e "Abatimento em massa" com "Desabatimento em massa"; usar `exact: true`. O `Modal` tem dois "Fechar" (o X do cabeçalho e o botão do rodapé). Com um mês selecionado, a lista (e o modal em massa) só tem linhas daquele mês.
+- 250 testes, 92 e2e (2 novos, suíte completa rodada sozinha), lint 0 erros, build OK.
+
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 296**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 297**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

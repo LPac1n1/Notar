@@ -51,7 +51,7 @@ export function useStatusChangeAction({
       successMessage = "",
       errorMessage = "Não foi possível concluir a operação.",
       undo,
-      // Optional: per-call busy flag (e.g. `setIsBulkAbating`) when the row's
+      // Optional: per-call busy flag (e.g. the bulk abate/unabate progress) when the row's
       // updating flag is not the right indicator. Called with `true` at start
       // and `false` in the finally block.
       setBusy,
