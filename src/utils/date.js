@@ -106,19 +106,36 @@ function toAbsoluteMonthIndex(month) {
   return match ? Number(match[1]) * 12 + Number(match[2]) - 1 : null;
 }
 
+function formatContiguousMonths(months) {
+  const first = formatMonthAbbrev(months[0]);
+
+  if (months.length === 1) {
+    return first;
+  }
+
+  const last = formatMonthAbbrev(months[months.length - 1]);
+
+  return months.length === 2 ? `${first} e ${last}` : `${first} até ${last}`;
+}
+
 /**
  * Rótulo de um conjunto de meses.
  *
- *   um mês                 "Mar/2026"
- *   dois meses             "Jan/2026 e Fev/2026"
- *   três ou mais seguidos  "Jan/2026 até Mar/2026"
- *   três ou mais com falha "Jan/2026, Mar/2026 e Abr/2026"
+ * Os meses são quebrados em trechos seguidos, e cada trecho vira:
  *
- * O "até" só aparece quando não há buraco. Janeiro, março e abril como
- * "Jan/2026 até Abr/2026" diria que fevereiro está no total — e o sistema de
- * baixa registraria um mês que ninguém abateu. A virada de ano conta como
- * seguida (dez → jan), por isso a comparação é por índice absoluto de mês e
- * não pelo número do mês sozinho.
+ *   um mês        "Mar/2026"
+ *   dois meses    "Jan/2026 e Fev/2026"
+ *   três ou mais  "Jan/2026 até Mar/2026"
+ *
+ * Trechos separados por um mês que não entra no conjunto (um mês já abatido,
+ * por exemplo) são ligados por ponto e vírgula:
+ *
+ *   jan, fev, mar, mai, jun  →  "Jan/2026 até Mar/2026; Mai/2026 e Jun/2026"
+ *
+ * O "até" nunca atravessa um buraco: "Jan/2026 até Jun/2026" nesse exemplo
+ * diria que abril está no total, e o sistema de baixa registraria um mês que
+ * ninguém abateu. A virada de ano conta como seguida (dez → jan), por isso a
+ * comparação é por índice absoluto de mês e não pelo número do mês sozinho.
  *
  * Aceita `AAAA-MM` ou data completa, em qualquer ordem e com repetição.
  */
@@ -131,30 +148,21 @@ export function formatMonthsSpan(months = []) {
     ),
   ].sort();
 
-  if (unicos.length === 0) {
-    return "";
+  const trechos = [];
+
+  for (const month of unicos) {
+    const indice = toAbsoluteMonthIndex(month);
+    const trechoAtual = trechos[trechos.length - 1];
+
+    if (trechoAtual && indice === trechoAtual.ultimoIndice + 1) {
+      trechoAtual.meses.push(month);
+      trechoAtual.ultimoIndice = indice;
+    } else {
+      trechos.push({ meses: [month], ultimoIndice: indice });
+    }
   }
 
-  const rotulos = unicos.map((month) => formatMonthAbbrev(month));
-
-  if (rotulos.length === 1) {
-    return rotulos[0];
-  }
-
-  if (rotulos.length === 2) {
-    return `${rotulos[0]} e ${rotulos[1]}`;
-  }
-
-  const indices = unicos.map(toAbsoluteMonthIndex);
-  const seguidos = indices.every(
-    (indice, posicao) => posicao === 0 || indice === indices[posicao - 1] + 1,
-  );
-
-  if (seguidos) {
-    return `${rotulos[0]} até ${rotulos[rotulos.length - 1]}`;
-  }
-
-  return `${rotulos.slice(0, -1).join(", ")} e ${rotulos[rotulos.length - 1]}`;
+  return trechos.map((trecho) => formatContiguousMonths(trecho.meses)).join("; ");
 }
 
 /**

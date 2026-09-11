@@ -160,8 +160,8 @@ test("a planilha de pendentes soma, por CPF, só os meses que ainda dá para aba
     const porCpf = new Map(linhas.map((linha) => [linha.cpf, linha]));
 
     // Maria: fevereiro foi realizado e março foi abatido pelo acumulado de
-    // abril. Sobram janeiro e abril — com um buraco no meio, então "e", nunca
-    // "até".
+    // abril. Sobram janeiro e abril, com dois meses fora do total no meio —
+    // dois trechos, separados por ponto e vírgula.
     const maria = porCpf.get("11111111111");
     assert.equal(maria.notesCount, 17);
     assert.deepEqual(maria.referenceMonths, ["2026-01-01", "2026-04-01"]);
@@ -172,7 +172,7 @@ test("a planilha de pendentes soma, por CPF, só os meses que ainda dá para aba
         referenceMonths: maria.referenceMonths,
         groupHasAuxiliaries: maria.groupHasAuxiliaries,
       }),
-      "Doações NFP - MARIA SILVA - Jan/2026 e Abr/2026",
+      "Doações NFP - MARIA SILVA - Jan/2026; Abr/2026",
     );
 
     // Joao continua na linha dele, com a contagem dele — e com o nome e o CPF
