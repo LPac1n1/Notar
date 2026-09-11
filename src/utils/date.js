@@ -106,63 +106,100 @@ function toAbsoluteMonthIndex(month) {
   return match ? Number(match[1]) * 12 + Number(match[2]) - 1 : null;
 }
 
-function formatContiguousMonths(months) {
-  const first = formatMonthAbbrev(months[0]);
-
-  if (months.length === 1) {
-    return first;
-  }
-
-  const last = formatMonthAbbrev(months[months.length - 1]);
-
-  return months.length === 2 ? `${first} e ${last}` : `${first} até ${last}`;
-}
-
-/**
- * Rótulo de um conjunto de meses.
- *
- * Os meses são quebrados em trechos seguidos, e cada trecho vira:
- *
- *   um mês        "Mar/2026"
- *   dois meses    "Jan/2026 e Fev/2026"
- *   três ou mais  "Jan/2026 até Mar/2026"
- *
- * Trechos separados por um mês que não entra no conjunto (um mês já abatido,
- * por exemplo) são ligados por ponto e vírgula:
- *
- *   jan, fev, mar, mai, jun  →  "Jan/2026 até Mar/2026; Mai/2026 e Jun/2026"
- *
- * O "até" nunca atravessa um buraco: "Jan/2026 até Jun/2026" nesse exemplo
- * diria que abril está no total, e o sistema de baixa registraria um mês que
- * ninguém abateu. A virada de ano conta como seguida (dez → jan), por isso a
- * comparação é por índice absoluto de mês e não pelo número do mês sozinho.
- *
- * Aceita `AAAA-MM` ou data completa, em qualquer ordem e com repetição.
- */
-export function formatMonthsSpan(months = []) {
-  const unicos = [
+function normalizeMonthList(months = []) {
+  return [
     ...new Set(
       months
         .map((month) => String(month ?? "").slice(0, 7))
         .filter((month) => /^\d{4}-\d{2}$/.test(month)),
     ),
   ].sort();
+}
+
+function formatMonthRun(trecho) {
+  const first = formatMonthAbbrev(trecho.primeiroMes);
+
+  if (trecho.ultimoIndice === trecho.primeiroIndice) {
+    return first;
+  }
+
+  const last = formatMonthAbbrev(trecho.ultimoMes);
+
+  return trecho.ultimoIndice - trecho.primeiroIndice === 1
+    ? `${first} e ${last}`
+    : `${first} até ${last}`;
+}
+
+/**
+ * Rótulo de um conjunto de meses.
+ *
+ * Os meses são agrupados em trechos, e cada trecho vira:
+ *
+ *   um mês                           "Mar/2026"
+ *   dois meses vizinhos              "Jan/2026 e Fev/2026"
+ *   primeiro e último com mês entre  "Jan/2026 até Mar/2026"
+ *
+ * Trechos são ligados por ponto e vírgula. Onde um trecho acaba depende de
+ * `breakMonths`:
+ *
+ *  • Sem `breakMonths`, qualquer mês que falte parte o trecho — o rótulo
+ *    descreve exatamente os meses recebidos. É o uso da transferência, que
+ *    lista meses com doação.
+ *
+ *  • Com `breakMonths`, SÓ esses meses partem o trecho; os outros que faltam
+ *    são atravessados pelo "até". É o uso da planilha dos pendentes: um mês
+ *    sem doação no meio não precisava de abatimento, então "Jan/2026 até
+ *    Mar/2026" continua verdadeiro — e partir ali faria o doador perguntar
+ *    por que aquele mês não foi abatido. Já um mês COM doação que ficou de
+ *    fora (abatido antes) parte, porque o "até" diria que ele está no total.
+ *
+ *     pendentes jan, fev, mar, mai, jun; abril abatido (breakMonths = [abr])
+ *       → "Jan/2026 até Mar/2026; Mai/2026 e Jun/2026"
+ *     pendentes jan e mar; fevereiro sem doação (breakMonths = [])
+ *       → "Jan/2026 até Mar/2026"
+ *
+ * A virada de ano conta como seguida (dez → jan): a comparação é por índice
+ * absoluto de mês, não pelo número do mês sozinho.
+ *
+ * Aceita `AAAA-MM` ou data completa, em qualquer ordem e com repetição.
+ */
+export function formatMonthsSpan(months = [], { breakMonths } = {}) {
+  const unicos = normalizeMonthList(months);
+  const quebras =
+    breakMonths == null
+      ? null
+      : normalizeMonthList(breakMonths).map(toAbsoluteMonthIndex);
 
   const trechos = [];
 
   for (const month of unicos) {
     const indice = toAbsoluteMonthIndex(month);
     const trechoAtual = trechos[trechos.length - 1];
+    let continuaTrecho = false;
 
-    if (trechoAtual && indice === trechoAtual.ultimoIndice + 1) {
-      trechoAtual.meses.push(month);
+    if (trechoAtual) {
+      continuaTrecho =
+        quebras === null
+          ? indice === trechoAtual.ultimoIndice + 1
+          : !quebras.some(
+              (quebra) => quebra > trechoAtual.ultimoIndice && quebra < indice,
+            );
+    }
+
+    if (continuaTrecho) {
+      trechoAtual.ultimoMes = month;
       trechoAtual.ultimoIndice = indice;
     } else {
-      trechos.push({ meses: [month], ultimoIndice: indice });
+      trechos.push({
+        primeiroMes: month,
+        primeiroIndice: indice,
+        ultimoMes: month,
+        ultimoIndice: indice,
+      });
     }
   }
 
-  return trechos.map((trecho) => formatContiguousMonths(trecho.meses)).join("; ");
+  return trechos.map(formatMonthRun).join("; ");
 }
 
 /**

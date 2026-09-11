@@ -171,4 +171,45 @@ test("sem mês selecionado, a planilha soma os meses pendentes de cada CPF", asy
 
   // Uma linha por CPF, não uma por mês.
   expect(planilha.getCell(9, 4).value ?? null).toBeNull();
+
+  // Agora fevereiro é abatido para os dois. Fevereiro TEVE doação, então ele
+  // parte o intervalo: "até" diria que ele está no total da planilha.
+  const secao = page
+    .getByRole("heading", { name: "Resumo mensal" })
+    .locator("xpath=ancestor::section[1]");
+  await secao.locator('input[name="referenceMonth"]').fill("02/2026");
+  await page.getByRole("button", { name: "Abater em massa", exact: true }).click();
+  const abate = page.getByRole("dialog", {
+    name: "Abatimento em massa",
+    exact: true,
+  });
+  await abate.getByRole("button", { name: /Fevereiro de 2026/ }).click();
+  await abate
+    .getByRole("button", { name: "Abater 2 selecionado(s)", exact: true })
+    .click();
+  await expect(abate).toHaveCount(0);
+
+  await secao.locator('input[name="referenceMonth"]').fill("");
+  const segundoDownload = page.waitForEvent("download", { timeout: 120000 });
+  await page.getByRole("button", { name: "Planilha dos pendentes" }).click();
+  const segundoArquivo = await segundoDownload;
+
+  const segundoDestino = path.join(
+    os.tmpdir(),
+    "notar-abatimento-pendentes-sem-fevereiro-e2e.xlsx",
+  );
+  await segundoArquivo.saveAs(segundoDestino);
+  const segundoWorkbook = new ExcelJS.Workbook();
+  await segundoWorkbook.xlsx.readFile(segundoDestino);
+  const semFevereiro = segundoWorkbook.worksheets[0];
+
+  // Alice 8 + 18, Bruno 4 + 3: fevereiro saiu da soma e da descrição.
+  expect(semFevereiro.getRow(7).getCell(2).value).toBe(26);
+  expect(semFevereiro.getRow(7).getCell(3).value).toBe(
+    "Doações NFP - Jan/2026; Mar/2026",
+  );
+  expect(semFevereiro.getRow(8).getCell(2).value).toBe(7);
+  expect(semFevereiro.getRow(8).getCell(3).value).toBe(
+    "Doações NFP - Jan/2026; Mar/2026",
+  );
 });

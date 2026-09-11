@@ -647,7 +647,9 @@ Quatro pedidos. Dois bugs reais reproduzidos em e2e antes de corrigir, e uma reg
 - **Planilha dos pendentes**: sem mês selecionado, o botão vira "Planilha dos pendentes" e gera uma linha por CPF com todos os meses pendentes somados (VALOR = soma das notas).
   - Regra de pendente = a do contador da visão por mês: `pending`, com nota, e nenhum acumulado de OUTRO mês cobrindo. Sem a exclusão do acumulado o destino abateria a mesma doação duas vezes — verificado por mutação (o teste falha com a cláusula removida).
   - O status é por doador e a linha é por CPF: o casamento é `monthly_donor_summary.donor_id = donors.id` (dono do vínculo de CPF) no mesmo mês.
-  - Descrição por `formatMonthsSpan` (em `utils/date.js`). Os meses são quebrados em trechos seguidos; cada trecho vira "Mar/2026" (um), "Jan/2026 e Fev/2026" (dois) ou "Jan/2026 até Mar/2026" (três ou mais), e trechos separados por um mês que não entra são ligados por ponto e vírgula: "Jan/2026 até Mar/2026; Mai/2026 e Jun/2026". A regra de trechos foi definida pelo usuário no commit 296 — a primeira versão listava tudo com vírgula quando havia buraco. O "até" nunca atravessa um mês fora do total. Virada de ano conta como seguida — comparação por índice absoluto de mês.
+  - Descrição por `formatMonthsSpan` (em `utils/date.js`). Cada trecho vira "Mar/2026" (um mês), "Jan/2026 e Fev/2026" (dois meses vizinhos) ou "Jan/2026 até Mar/2026" (primeiro e último com mês entre eles), e trechos são ligados por ponto e vírgula: "Jan/2026 até Mar/2026; Mai/2026 e Jun/2026" (regra de trechos do usuário, commit 296).
+  - **Na planilha dos pendentes, só um mês COM doação que ficou de fora parte o trecho** (abatido antes, coberto por acumulado, de outro projeto). Mês sem doação no meio é atravessado pelo "até". Correção do usuário no commit 298: o commit 296 partia em qualquer mês que faltasse, e isso faria o doador perguntar por que um mês sem doação "não foi abatido". A consulta devolve `donation_months` (todo mês com nota válida do CPF, em importação processada, qualquer status e projeto), `buildAbatementDescription({ donationMonths })` calcula os meses que partem e passa como `breakMonths`. Sem `breakMonths`, `formatMonthsSpan` parte em qualquer mês que falte — é o modo da transferência, que descreve meses com doação ao pé da letra. `parseMonthList` é compartilhado entre o serviço e o teste de integração.
+  - Virada de ano conta como seguida — comparação por índice absoluto de mês.
   - DATA sai do mês mais recente DE CADA LINHA (`row.referenceMonth`, lido pelo workbook), não de um mês do arquivo: dois CPFs da mesma planilha podem ter conjuntos diferentes. Arquivo com sufixo `-pendentes`, um por demanda.
   - Colunas, junções e agrupamento viraram constantes compartilhadas com a planilha do mês em `abatementSheetSql.js` — duas cópias da identidade do titular divergiriam na primeira correção.
   - Exportar não marca nada como realizado, igual à planilha do mês.
@@ -670,7 +672,7 @@ Quatro pedidos. Dois bugs reais reproduzidos em e2e antes de corrigir, e uma reg
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 297**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 298**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

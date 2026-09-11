@@ -1,6 +1,9 @@
 import { queryPrepared, startOfMonth } from "../db";
 import { formatCpf } from "../../utils/cpf";
-import { buildAbatementDescription } from "./abatementSheetDescription";
+import {
+  buildAbatementDescription,
+  parseMonthList,
+} from "./abatementSheetDescription";
 import {
   buildAbatementSheetSql,
   buildPendingAbatementSheetSql,
@@ -9,7 +12,10 @@ import { getActiveProjectId } from "../activeProject.js";
 
 export { buildAbatementDescription };
 
-function mapSheetRow(row, { referenceMonth = "", referenceMonths = [] } = {}) {
+function mapSheetRow(
+  row,
+  { referenceMonth = "", referenceMonths = [], donationMonths } = {},
+) {
   const donorName = row.donor_name ?? "";
   const groupHasAuxiliaries = Boolean(row.group_has_auxiliaries);
 
@@ -32,6 +38,7 @@ function mapSheetRow(row, { referenceMonth = "", referenceMonths = [] } = {}) {
       donorName,
       referenceMonth,
       referenceMonths,
+      donationMonths,
       groupHasAuxiliaries,
     }),
   };
@@ -60,10 +67,14 @@ export async function listAbatementSheetRows({ referenceMonth } = {}) {
  * Uma linha por CPF com TODOS os meses ainda pendentes somados.
  *
  * VALOR é a soma das notas desses meses e a descrição nomeia o conjunto
- * ("Jan/2026 e Fev/2026", "Jan/2026 até Mar/2026"). Cada linha carrega o
- * próprio `referenceMonth` — o mais recente dos meses dela —, porque aqui não
- * existe um mês do arquivo: dois CPFs da mesma planilha podem ter pendências
- * em meses diferentes, e a DATA de cada um sai do conjunto dele.
+ * ("Jan/2026 e Fev/2026", "Jan/2026 até Mar/2026; Mai/2026"). Os meses com
+ * doação do CPF vão junto para a descrição saber onde partir o "até" — só num
+ * mês com doação que ficou de fora, nunca num mês sem doação.
+ *
+ * Cada linha carrega o próprio `referenceMonth` — o mais recente dos meses
+ * dela —, porque aqui não existe um mês do arquivo: dois CPFs da mesma
+ * planilha podem ter pendências em meses diferentes, e a DATA de cada um sai
+ * do conjunto dele.
  */
 export async function listPendingAbatementSheetRows() {
   const rows = await queryPrepared(
@@ -71,14 +82,11 @@ export async function listPendingAbatementSheetRows() {
   );
 
   return rows.map((row) => {
-    const referenceMonths = String(row.reference_months ?? "")
-      .split(",")
-      .map((month) => month.trim())
-      .filter(Boolean)
-      .sort();
+    const referenceMonths = parseMonthList(row.reference_months);
+    const donationMonths = parseMonthList(row.donation_months);
 
     return {
-      ...mapSheetRow(row, { referenceMonths }),
+      ...mapSheetRow(row, { referenceMonths, donationMonths }),
       referenceMonths,
       referenceMonth:
         row.last_month ?? referenceMonths[referenceMonths.length - 1] ?? "",

@@ -114,18 +114,42 @@ export function buildAbatementSheetSql(projectId) {
  * consulta. Por isso o casamento é por doador e mês, sem passar pelo CPF.
  *
  * `reference_months` lista os meses somados (a descrição é montada a partir
- * deles) e `last_month` é o mais recente, de onde sai a DATA da linha. Sem
- * parâmetro nenhum: o projeto é embutido pelo helper, que o valida.
+ * deles) e `last_month` é o mais recente, de onde sai a DATA da linha.
+ *
+ * `donation_months` lista TODO mês em que o CPF teve nota válida, em qualquer
+ * status e projeto. A descrição usa a diferença entre as duas listas: um mês
+ * do meio que teve doação e não está pendente (abatido antes) parte o "até";
+ * um mês do meio sem doação é atravessado por ele.
+ *
+ * Sem parâmetro nenhum: o projeto é embutido pelo helper, que o valida.
  */
 export function buildPendingAbatementSheetSql(projectId) {
   return `
+  WITH cpf_donation_months AS (
+    SELECT
+      import_cpf_summary.cpf AS cpf,
+      string_agg(
+        DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
+        ','
+      ) AS donation_months
+    FROM import_cpf_summary
+    INNER JOIN imports
+      ON imports.id = import_cpf_summary.import_id
+    WHERE import_cpf_summary.notes_count > 0
+      AND imports.status = 'processed'
+    GROUP BY import_cpf_summary.cpf
+  )
   SELECT ${SHEET_COLUMNS},
     string_agg(
       DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
       ','
     ) AS reference_months,
-    strftime(max(import_cpf_summary.reference_month), '%Y-%m-01') AS last_month
+    strftime(max(import_cpf_summary.reference_month), '%Y-%m-01') AS last_month,
+    -- Uma linha por CPF na CTE, então o max só tira o valor do agrupamento.
+    max(cpf_donation_months.donation_months) AS donation_months
   ${SHEET_FROM}
+  LEFT JOIN cpf_donation_months
+    ON cpf_donation_months.cpf = donor_cpf_links.cpf
   WHERE import_cpf_summary.notes_count > 0
     AND ${donorBelongedToProjectAtMonth(
       "donors.id",
