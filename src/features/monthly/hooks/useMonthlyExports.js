@@ -21,15 +21,23 @@ const loadJpegReportExporter = () =>
     (mod) => mod.exportDonationReportJpeg,
   );
 
-function describeAbatementSheetExport(result, isPendingSheet) {
+function describeAbatementSheetExport(result, { isPendingSheet, isMonthsSheet }) {
   if (result.rowCount === 0) {
-    return isPendingSheet
-      ? "Nenhum abatimento pendente — nenhuma planilha foi gerada."
+    if (isPendingSheet) {
+      return "Nenhum abatimento pendente — nenhuma planilha foi gerada.";
+    }
+
+    return isMonthsSheet
+      ? "Nenhuma doação nos meses selecionados — nenhuma planilha foi gerada."
       : "Nenhuma doação neste mês — nenhuma planilha foi gerada.";
   }
 
   if (isPendingSheet) {
     return `${formatInteger(result.rowCount)} CPF(s) com ${formatInteger(result.monthCount)} mês(es) pendente(s) somados, em ${formatInteger(result.demandCount)} planilha(s), uma por demanda.`;
+  }
+
+  if (isMonthsSheet) {
+    return `${formatInteger(result.rowCount)} CPF(s) com ${formatInteger(result.monthCount)} mês(es) somados, em ${formatInteger(result.demandCount)} planilha(s), uma por demanda.`;
   }
 
   return `${result.rowCount} CPF(s) em ${result.demandCount} planilha(s), uma por demanda.`;
@@ -156,30 +164,47 @@ export function useMonthlyExports({
     setSuccessMessage("");
     setSuccessAction(null);
 
-    const isPendingSheet = !filters.referenceMonth;
+    const selectedMonths = (filters.referenceMonths ?? []).filter(Boolean);
+    const isMonthsSheet = selectedMonths.length > 1;
+    const isPendingSheet = !isMonthsSheet && !filters.referenceMonth;
 
     setIsExportingAbatementSheet(true);
     try {
       const result = await monthlyOperation.run(
         () =>
-          exportAbatementSheetWorkbook({ referenceMonth: filters.referenceMonth }),
+          exportAbatementSheetWorkbook({
+            referenceMonth: filters.referenceMonth,
+            referenceMonths: selectedMonths,
+          }),
         {
           loadingMessage: isPendingSheet
             ? "Gerando planilha dos meses pendentes..."
-            : "Gerando planilha de abatimento...",
+            : isMonthsSheet
+              ? "Gerando planilha dos meses selecionados..."
+              : "Gerando planilha de abatimento...",
         },
       );
-      const exportSummary = describeAbatementSheetExport(result, isPendingSheet);
+      const exportSummary = describeAbatementSheetExport(result, {
+        isPendingSheet,
+        isMonthsSheet,
+      });
       await createActionHistoryEntry({
         actionType: "export",
         entityType: "export",
-        entityId: isPendingSheet ? "abatement-sheet-pending" : "abatement-sheet",
+        entityId: isPendingSheet
+          ? "abatement-sheet-pending"
+          : isMonthsSheet
+            ? "abatement-sheet-months"
+            : "abatement-sheet",
         label: isPendingSheet
           ? "Planilha de abatimento (pendentes)"
-          : "Planilha de abatimento",
+          : isMonthsSheet
+            ? "Planilha de abatimento (meses selecionados)"
+            : "Planilha de abatimento",
         description: exportSummary,
         payload: {
           referenceMonth: filters.referenceMonth,
+          referenceMonths: selectedMonths,
           rowCount: result.rowCount,
           demandCount: result.demandCount,
           monthCount: result.monthCount,

@@ -19,14 +19,20 @@ function getMonthButtonClassName(isApplied) {
 export default function ConsolidatedPendingDonors({
   donors,
   onCatchUp,
+  onDeleteAdjustment,
   onOpenDonor,
   onStatusChange,
+  selectedMonthsLabel = "",
   updatingDonorId = "",
 }) {
   return (
     <SectionCard
       title="Abatimentos por doador"
-      description="Histórico consolidado dos meses com doação."
+      description={
+        selectedMonthsLabel
+          ? `Valores somados de ${selectedMonthsLabel}, com o detalhe de cada mês.`
+          : "Histórico consolidado dos meses com doação."
+      }
       className="mb-5"
     >
       {donors.length === 0 ? (
@@ -218,6 +224,22 @@ export default function ConsolidatedPendingDonors({
                         Lançar acumulado
                       </Button>
                     ) : null}
+
+                    {onDeleteAdjustment
+                      ? (donor.adjustments ?? []).map((adjustment) => (
+                          <Button
+                            key={adjustment.id}
+                            variant="subtle"
+                            className="w-full"
+                            disabled={isUpdating}
+                            onClick={() => onDeleteAdjustment(donor, adjustment)}
+                            title="Apaga o lançamento de acumulado. Os meses que ele cobria voltam a ser pendentes, um a um."
+                          >
+                            Deslançar acumulado de{" "}
+                            {formatMonthYear(adjustment.referenceMonth)}
+                          </Button>
+                        ))
+                      : null}
 
                     {pendingMonths.length > 0 ? (
                       <Button

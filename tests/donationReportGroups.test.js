@@ -144,3 +144,126 @@ test("acumulado que absorve o mês substitui o valor, não soma duas vezes", () 
     assert.equal(holder.abatementAmount, 129.5);
   }
 });
+
+/**
+ * Detalhe por mês.
+ *
+ * Com vários meses escolhidos na Gestão Mensal, as colunas do relatório
+ * mostram o TOTAL do período; `months` é o que diz de onde veio cada parte.
+ * O que estes testes travam é a relação entre os dois: o detalhe sempre soma
+ * exatamente o total das colunas.
+ */
+function holderFor(summaries) {
+  const [group] = mapDemandGroups({ demands: DEMANDS, summaries });
+  return group.holders[0];
+}
+
+test("dois meses do mesmo doador somam no total e aparecem separados no detalhe", () => {
+  const holder = holderFor([
+    buildSummary({
+      referenceMonth: "2026-02-01",
+      notesCount: 12,
+      monthNotesCount: 12,
+      abatementAmount: 24,
+    }),
+    buildSummary({
+      referenceMonth: "2026-03-01",
+      notesCount: 18,
+      monthNotesCount: 18,
+      abatementAmount: 36,
+    }),
+  ]);
+
+  assert.equal(holder.notesCount, 30);
+  assert.equal(holder.abatementAmount, 60);
+  assert.deepEqual(holder.months, [
+    { referenceMonth: "2026-02", notesCount: 12, abatementAmount: 24 },
+    { referenceMonth: "2026-03", notesCount: 18, abatementAmount: 36 },
+  ]);
+
+  const somaDoDetalhe = holder.months.reduce(
+    (total, month) => total + month.abatementAmount,
+    0,
+  );
+  assert.equal(somaDoDetalhe, holder.abatementAmount);
+});
+
+test("o detalhe sai em ordem de mês, mesmo com os resumos fora de ordem", () => {
+  // A consulta devolve do mês mais recente para o mais antigo.
+  const holder = holderFor([
+    buildSummary({
+      referenceMonth: "2026-03-01",
+      notesCount: 18,
+      abatementAmount: 36,
+    }),
+    buildSummary({
+      referenceMonth: "2026-01-01",
+      notesCount: 8,
+      abatementAmount: 16,
+    }),
+    buildSummary({
+      referenceMonth: "2026-02-01",
+      notesCount: 12,
+      abatementAmount: 24,
+    }),
+  ]);
+
+  assert.deepEqual(
+    holder.months.map((month) => month.referenceMonth),
+    ["2026-01", "2026-02", "2026-03"],
+  );
+});
+
+test("mês repetido (duas importações) vira uma entrada só no detalhe", () => {
+  const holder = holderFor([
+    buildSummary({
+      referenceMonth: "2026-02-01",
+      notesCount: 5,
+      abatementAmount: 10,
+    }),
+    buildSummary({
+      referenceMonth: "2026-02-01",
+      notesCount: 7,
+      abatementAmount: 14,
+    }),
+  ]);
+
+  assert.equal(holder.notesCount, 12);
+  assert.deepEqual(holder.months, [
+    { referenceMonth: "2026-02", notesCount: 12, abatementAmount: 24 },
+  ]);
+});
+
+test("acumulado que consolida o mês substitui também o detalhe", () => {
+  // O acumulado de março já embute janeiro. Se o detalhe guardasse o mês
+  // anterior junto, a linha fina contradiria o total das colunas.
+  const holder = holderFor([
+    buildSummary({
+      referenceMonth: "2026-01-01",
+      notesCount: 8,
+      monthNotesCount: 8,
+      abatementAmount: 16,
+    }),
+    buildSummary({
+      referenceMonth: "2026-03-01",
+      notesCount: 0,
+      monthNotesCount: 0,
+      abatementAmount: 60,
+      hasAdjustment: true,
+      adjustmentSubsumesMonth: true,
+      adjustment: {
+        id: "adj-3",
+        notesCount: 30,
+        description: "Acumulado",
+        rangeStartMonth: "2026-01-01",
+        rangeEndMonth: "2026-03-01",
+      },
+    }),
+  ]);
+
+  assert.equal(holder.notesCount, 30);
+  assert.equal(holder.abatementAmount, 60);
+  assert.deepEqual(holder.months, [
+    { referenceMonth: "2026-03", notesCount: 30, abatementAmount: 60 },
+  ]);
+});

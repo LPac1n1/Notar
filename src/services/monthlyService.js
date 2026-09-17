@@ -23,9 +23,10 @@ export {
 } from "./monthly/abatementUpdates";
 
 /**
- * Top-level dispatcher. Picks the by-month variant when a `referenceMonth`
- * is supplied (the page UX) and the historical variant otherwise (used by
- * exports and reports).
+ * Top-level dispatcher. Picks the by-month variant when UM mês é escolhido
+ * (a UX da página) e a variante histórica nos outros dois casos: nenhum mês
+ * (visão consolidada de sempre) e VÁRIOS meses, que é a mesma visão
+ * consolidada recortada pelo conjunto escolhido.
  *
  * Optional `limit`/`offset` apply AFTER the post-processing pass (filters,
  * adjustment merge, sort) because the merge synthesizes rows for active
@@ -34,6 +35,7 @@ export {
  */
 export async function listMonthlySummaries({
   referenceMonth = "",
+  referenceMonths = [],
   donorId = "",
   donorType = "all",
   cpf = "",
@@ -50,7 +52,8 @@ export async function listMonthlySummaries({
   // Este dispatcher repassa uma lista EXPLÍCITA de filtros — o que não estiver
   // aqui é descartado em silêncio antes de chegar na query. Ao adicionar um
   // filtro novo, inclua-o nos dois ramos.
-  const rows = referenceMonth
+  const monthList = (referenceMonths ?? []).filter(Boolean);
+  const rows = referenceMonth && monthList.length <= 1
     ? await listMonthlySummariesByMonth({
         referenceMonth,
         donorId,
@@ -66,6 +69,7 @@ export async function listMonthlySummaries({
       })
     : await listHistoricalMonthlySummaries({
         referenceMonth,
+        referenceMonths: monthList,
         donorId,
         donorType,
         cpf,

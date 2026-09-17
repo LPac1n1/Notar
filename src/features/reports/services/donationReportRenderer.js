@@ -1,6 +1,11 @@
 import { listDemands } from "../../../services/demandService";
 import { listMonthlySummaries } from "../../../services/monthlyService";
-import { formatMonthYear, hasDonationStartConflict } from "../../../utils/date";
+import {
+  formatMonthAbbrev,
+  formatMonthYear,
+  formatMonthsSpan,
+  hasDonationStartConflict,
+} from "../../../utils/date";
 import { getContrastTextColor } from "../../../utils/demandColor";
 import { formatCurrency, formatInteger } from "../../../utils/format";
 import { buildSlug } from "../../../utils/slug";
@@ -27,13 +32,67 @@ function formatGeneratedAt(date = new Date()) {
   }).format(date);
 }
 
-function getPeriodLabel(referenceMonth) {
+function getPeriodLabel(referenceMonth, referenceMonths = []) {
+  // Vários meses escolhidos: o cabeçalho nomeia o conjunto com a mesma regra
+  // da planilha ("Mai/2026 e Jun/2026", "Mai/2026 até Jul/2026").
+  if (referenceMonths.length > 1) {
+    return formatMonthsSpan(referenceMonths);
+  }
+
   return referenceMonth
     ? formatMonthYear(referenceMonth)
     : "Histórico completo";
 }
 
+function getPeriodSlugPart(reportData) {
+  const months = reportData.referenceMonths ?? [];
+
+  if (months.length > 1) {
+    return buildSlug(months[0] + "-a-" + months[months.length - 1]);
+  }
+
+  return reportData.referenceMonth
+    ? buildSlug(formatMonthYear(reportData.referenceMonth))
+    : "historico";
+}
+
+/**
+ * Linha fina sob o nome, com o que veio de cada mês.
+ *
+ * Só aparece quando o relatório soma mais de um mês: com um mês só as colunas
+ * já dizem tudo, e a linha seria repetição.
+ */
+function getMonthBreakdownText(row, reportData) {
+  if ((reportData.referenceMonths?.length ?? 0) < 2) {
+    return "";
+  }
+
+  const months = row.months ?? [];
+
+  if (months.length === 0) {
+    return "";
+  }
+
+  return months
+    .map(
+      (month) =>
+        formatMonthAbbrev(month.referenceMonth) +
+        ": " +
+        formatInteger(month.notesCount) +
+        " nota(s) " +
+        formatCurrency(month.abatementAmount),
+    )
+    .join("  |  ");
+}
+
 export async function buildDonationReportData(filters = {}) {
+  const referenceMonths = Array.from(
+    new Set(
+      (filters.referenceMonths ?? [])
+        .filter(Boolean)
+        .map((month) => String(month).slice(0, 7)),
+    ),
+  ).sort();
   const [summaries, demands] = await Promise.all([
     listMonthlySummaries(filters),
     listDemands(),
@@ -49,27 +108,21 @@ export async function buildDonationReportData(filters = {}) {
 
   return {
     generatedAt: formatGeneratedAt(),
-    periodLabel: getPeriodLabel(filters.referenceMonth),
+    periodLabel: getPeriodLabel(filters.referenceMonth, referenceMonths),
     referenceMonth: filters.referenceMonth,
+    referenceMonths,
     groups,
   };
 }
 
 export function getDemandReportFileName(reportData, group, extension = "pdf") {
   const demandPart = buildSlug(group.name);
-  const periodPart = reportData.referenceMonth
-    ? buildSlug(formatMonthYear(reportData.referenceMonth))
-    : "historico";
 
-  return `relatorio-doacoes-${demandPart || "demanda"}-${periodPart}.${extension}`;
+  return `relatorio-doacoes-${demandPart || "demanda"}-${getPeriodSlugPart(reportData)}.${extension}`;
 }
 
 export function getZipReportFileName(reportData) {
-  const periodPart = reportData.referenceMonth
-    ? buildSlug(formatMonthYear(reportData.referenceMonth))
-    : "historico";
-
-  return `relatorios-doacoes-por-demanda-${periodPart}.zip`;
+  return `relatorios-doacoes-por-demanda-${getPeriodSlugPart(reportData)}.zip`;
 }
 
 export function getDemandRowCount(group) {
@@ -434,7 +487,10 @@ export function drawDonationReport(doc, reportData) {
       label: "Doador titular",
       width: tableWidth * 0.52,
       getValue: (row) => row.name,
-      getSubValue: (row) => getAdjustmentNoteText(row),
+      getSubValue: (row) =>
+        [getAdjustmentNoteText(row), getMonthBreakdownText(row, reportData)]
+          .filter(Boolean)
+          .join("  |  "),
       bold: true,
     },
     {
@@ -450,7 +506,10 @@ export function drawDonationReport(doc, reportData) {
       label: "Doador auxiliar",
       width: tableWidth * 0.34,
       getValue: (row) => row.name,
-      getSubValue: (row) => getAdjustmentNoteText(row),
+      getSubValue: (row) =>
+        [getAdjustmentNoteText(row), getMonthBreakdownText(row, reportData)]
+          .filter(Boolean)
+          .join("  |  "),
       bold: true,
     },
     {

@@ -4,7 +4,10 @@ export {
 } from "../../constants/filterOptions";
 
 export const INITIAL_MONTHLY_FILTERS = {
+  // `referenceMonth` é derivado de `referenceMonths`: preenchido só quando
+  // há exatamente um mês escolhido. Ver `withSelectedMonths` em Monthly.jsx.
   referenceMonth: "",
+  referenceMonths: [],
   search: "",
   donorId: "",
   donorType: "all",

@@ -87,6 +87,7 @@ export function useConsolidatedMonthlyDonors({
         abatementStatus: "applied",
         ids: [],
         adjustmentIds: [],
+        adjustments: [],
         isSubsumed: false,
         subsumedByReferenceMonth: "",
       };
@@ -95,6 +96,7 @@ export function useConsolidatedMonthlyDonors({
       const adjustmentId = summary.adjustment?.id ?? "";
       if (adjustmentId && !month.adjustmentIds.includes(adjustmentId)) {
         month.adjustmentIds.push(adjustmentId);
+        month.adjustments.push(summary.adjustment);
       }
       month.abatementAmount += Number(summary.abatementAmount ?? 0);
       // Any pending row keeps the month pending; subsumption from any row
@@ -125,11 +127,17 @@ export function useConsolidatedMonthlyDonors({
     return Array.from(donorsById.values())
       .map((donor) => {
         const { monthsByRef, ...rest } = donor;
+        const months = Array.from(monthsByRef.values()).sort((left, right) =>
+          left.referenceMonth.localeCompare(right.referenceMonth),
+        );
+
         return {
           ...rest,
-          months: Array.from(monthsByRef.values()).sort((left, right) =>
-            left.referenceMonth.localeCompare(right.referenceMonth),
-          ),
+          months,
+          // Os acumulados que este doador tem no recorte exibido. O card usa
+          // para oferecer "Deslançar": o lançamento vive em tabela própria, e
+          // desfazê-lo é apagar a linha, não mudar status de mês.
+          adjustments: months.flatMap((month) => month.adjustments ?? []),
         };
       })
       .sort(

@@ -74,6 +74,7 @@ async function fetchDonorContextById(donorIds) {
  */
 export async function listHistoricalMonthlySummaries({
   referenceMonth = "",
+  referenceMonths = [],
   donorId = "",
   donorType = "all",
   cpf = "",
@@ -119,6 +120,26 @@ export async function listHistoricalMonthlySummaries({
   if (referenceMonth) {
     conditions.push("monthly_donor_summary.reference_month = ?");
     params.push(startOfMonth(referenceMonth));
+  }
+
+  // Recorte por VÁRIOS meses — a seleção múltipla da Gestão Mensal. Cada linha
+  // já é um mês, então o conjunto entra como IN e o resto da função (merge de
+  // acumulado, subsunção, ordenação) continua valendo sem ramo novo.
+  const normalizedMonths = Array.from(
+    new Set(
+      (referenceMonths ?? [])
+        .map((month) => startOfMonth(month))
+        .filter(Boolean),
+    ),
+  );
+
+  if (normalizedMonths.length > 0) {
+    conditions.push(
+      `monthly_donor_summary.reference_month IN (${normalizedMonths
+        .map(() => "?")
+        .join(", ")})`,
+    );
+    params.push(...normalizedMonths);
   }
 
   if (donorId.trim()) {
@@ -227,6 +248,13 @@ export async function listHistoricalMonthlySummaries({
         if (
           normalizedReferenceMonth &&
           adjustment.referenceMonth !== normalizedReferenceMonth
+        )
+          return null;
+        // Mesmo recorte do WHERE: sem isto, um acumulado lançado num mês fora
+        // da seleção entraria como linha sintética e somaria no total exibido.
+        if (
+          normalizedMonths.length > 0 &&
+          !normalizedMonths.includes(adjustment.referenceMonth)
         )
           return null;
         if (normalizedCpf && donor.cpf !== normalizedCpf) return null;

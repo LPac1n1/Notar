@@ -16,6 +16,7 @@ import { formatCurrency, formatInteger } from "../../../utils/format";
  */
 export default function MonthSwitcher({
   selectedReferenceMonth,
+  selectedMonthsCount = 0,
   availableImports,
   onSelectMonth,
 }) {
@@ -48,9 +49,14 @@ export default function MonthSwitcher({
   const selectedImport = availableImports.find(
     (item) => item.referenceMonth === selectedReferenceMonth,
   );
+  // Com vários meses marcados no carrossel não existe "o mês" para mostrar
+  // aqui; o chip passa a dizer quantos são. Escolher um mês por este menu
+  // continua sendo seleção única e substitui a marcação.
   const triggerLabel = selectedReferenceMonth
     ? formatMonthYear(selectedReferenceMonth)
-    : "Selecionar mês";
+    : selectedMonthsCount > 1
+      ? `${selectedMonthsCount} meses`
+      : "Selecionar mês";
 
   return (
     <div ref={containerRef} className="relative inline-block">

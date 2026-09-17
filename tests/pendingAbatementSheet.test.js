@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestConnection } from "./helpers/duckdbHelper.js";
 import { runMigrations } from "../src/services/db/migrations.js";
-import { buildPendingAbatementSheetSql } from "../src/services/monthly/abatementSheetSql.js";
+import {
+  buildMonthsAbatementSheetSql,
+  buildPendingAbatementSheetSql,
+} from "../src/services/monthly/abatementSheetSql.js";
 import {
   buildAbatementDescription,
   parseMonthList,
@@ -305,6 +308,109 @@ test("a planilha de pendentes é do projeto que está apurando", async () => {
       ["55555555555"],
     );
     assert.equal(capoeira[0].notesCount, 11);
+  } finally {
+    await conn.close();
+  }
+});
+
+/**
+ * Planilha dos meses ESCOLHIDOS na Gestão Mensal.
+ *
+ * Aqui o status não filtra nada: quem decide o período é quem exporta. O que
+ * continua valendo é a soma por CPF e a regra da descrição — mês com doação
+ * que ficou de fora parte o intervalo, mês sem doação é atravessado.
+ */
+async function monthsSheet(conn, months, projectId = DEFAULT_PROJECT_ID) {
+  const stmt = await conn.prepare(
+    buildMonthsAbatementSheetSql(projectId, months.length),
+  );
+
+  try {
+    const rows = (await stmt.query(...months)).toArray();
+
+    return rows.map((row) => {
+      const referenceMonths = parseMonthList(row.reference_months);
+      const donationMonths = parseMonthList(row.donation_months);
+      const donorName = String(row.donor_name);
+
+      return {
+        cpf: String(row.cpf),
+        donorName,
+        notesCount: Number(row.notes_count),
+        referenceMonths,
+        lastMonth: String(row.last_month),
+        description: buildAbatementDescription({
+          donorName,
+          referenceMonths,
+          donationMonths,
+          groupHasAuxiliaries: Boolean(row.group_has_auxiliaries),
+        }),
+      };
+    });
+  } finally {
+    await stmt.close();
+  }
+}
+
+test("a planilha dos meses escolhidos soma os meses marcados, em qualquer status", async () => {
+  const conn = await createTestConnection();
+  try {
+    await seed(conn);
+
+    const linhas = await monthsSheet(conn, ["2026-01-01", "2026-02-01"]);
+    const porCpf = new Map(linhas.map((linha) => [linha.cpf, linha]));
+
+    // Eva tem janeiro REALIZADO e mesmo assim entra: o recorte é a escolha do
+    // operador, não o status. É a diferença para a planilha de pendentes.
+    assert.equal(porCpf.get("44444444444").notesCount, 9);
+    assert.equal(porCpf.get("44444444444").description, "Doações NFP - Jan/2026");
+
+    // Maria soma os dois meses, inclusive fevereiro, que já estava realizado.
+    const maria = porCpf.get("11111111111");
+    assert.equal(maria.notesCount, 30);
+    assert.deepEqual(maria.referenceMonths, ["2026-01-01", "2026-02-01"]);
+    assert.equal(maria.lastMonth, "2026-02-01");
+    assert.equal(
+      maria.description,
+      "Doações NFP - MARIA SILVA - Jan/2026 e Fev/2026",
+    );
+
+    // Lucas não tem nota válida em fevereiro: o mês some da soma e do rótulo.
+    const lucas = porCpf.get("66666666666");
+    assert.equal(lucas.notesCount, 4);
+    assert.deepEqual(lucas.referenceMonths, ["2026-01-01"]);
+    assert.equal(lucas.description, "Doações NFP - Jan/2026");
+
+    // Dora é de outro projeto e não entra em nenhuma seleção de Moradia.
+    assert.equal(porCpf.has("55555555555"), false);
+  } finally {
+    await conn.close();
+  }
+});
+
+test("na planilha dos meses escolhidos, mês de fora com doação parte o rótulo", async () => {
+  const conn = await createTestConnection();
+  try {
+    await seed(conn);
+
+    const linhas = await monthsSheet(conn, ["2026-01-01", "2026-03-01"]);
+    const porCpf = new Map(linhas.map((linha) => [linha.cpf, linha]));
+
+    // Maria doou em fevereiro e fevereiro não foi escolhido: o "até" diria
+    // que ele está na soma, então o rótulo parte.
+    assert.equal(porCpf.get("11111111111").notesCount, 15);
+    assert.equal(
+      porCpf.get("11111111111").description,
+      "Doações NFP - MARIA SILVA - Jan/2026; Mar/2026",
+    );
+
+    // Lucas não doou em fevereiro: nada foi deixado de fora entre janeiro e
+    // março, então o intervalo atravessa o mês vazio.
+    assert.equal(porCpf.get("66666666666").notesCount, 10);
+    assert.equal(
+      porCpf.get("66666666666").description,
+      "Doações NFP - Jan/2026 até Mar/2026",
+    );
   } finally {
     await conn.close();
   }

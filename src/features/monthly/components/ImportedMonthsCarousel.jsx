@@ -9,9 +9,17 @@ import { formatCurrency, formatInteger } from "../../../utils/format";
 
 export default function ImportedMonthsCarousel({
   imports,
-  selectedReferenceMonth,
+  selectedReferenceMonths = [],
+  isMultiSelect = false,
   onSelectMonth,
+  onToggleMonth,
+  onToggleMultiSelect,
 }) {
+  // Comparação por mês: o carrossel guarda a data completa do mês de
+  // referência ("2026-03-01") e o campo de filtro entrega "2026-03".
+  const selectedKeys = new Set(
+    selectedReferenceMonths.map((month) => String(month).slice(0, 7)),
+  );
   const railRef = useRef(null);
   const trackRef = useRef(null);
   const dragStateRef = useRef(null);
@@ -164,11 +172,23 @@ export default function ImportedMonthsCarousel({
             Meses importados
           </p>
           <p className="mt-1 text-xs text-[var(--muted)]">
-            {formatInteger(imports.length)} mês(es) com planilha processada
+            {isMultiSelect
+              ? `${formatInteger(selectedKeys.size)} mês(es) selecionado(s) — os valores saem somados, com o detalhe de cada mês`
+              : `${formatInteger(imports.length)} mês(es) com planilha processada`}
           </p>
         </div>
 
         <div className="flex gap-2">
+          {onToggleMultiSelect ? (
+            <Button
+              variant={isMultiSelect ? "primary" : "subtle"}
+              onClick={onToggleMultiSelect}
+              aria-pressed={isMultiSelect}
+              title="Marque vários meses para ver, exportar e abater os valores somados no período."
+            >
+              {isMultiSelect ? "Selecionando vários" : "Selecionar vários"}
+            </Button>
+          ) : null}
           <Button
             variant="subtle"
             className="h-10 w-10 px-0"
@@ -209,15 +229,28 @@ export default function ImportedMonthsCarousel({
         }}
       >
         {imports.map((item) => {
-          const isSelected = item.referenceMonth === selectedReferenceMonth;
+          const isSelected = selectedKeys.has(
+            String(item.referenceMonth).slice(0, 7),
+          );
+          const actionLabel = isMultiSelect
+            ? isSelected
+              ? "Desmarcar"
+              : "Marcar"
+            : isSelected
+              ? "Limpar seleção de"
+              : "Selecionar";
 
           return (
             <button
               key={item.id}
               role="listitem"
               type="button"
-              onClick={() => onSelectMonth(isSelected ? "" : item.referenceMonth)}
-              aria-label={`${isSelected ? "Limpar seleção de" : "Selecionar"} ${formatMonthYear(item.referenceMonth)}`}
+              onClick={() =>
+                isMultiSelect
+                  ? onToggleMonth?.(item.referenceMonth)
+                  : onSelectMonth?.(isSelected ? "" : item.referenceMonth)
+              }
+              aria-label={`${actionLabel} ${formatMonthYear(item.referenceMonth)}`}
               aria-pressed={isSelected}
               className={`snap-start min-w-[250px] rounded-md border p-4 text-left transition ${
                 isSelected
@@ -241,7 +274,13 @@ export default function ImportedMonthsCarousel({
                       : "bg-[color:var(--surface-muted)] text-[var(--text-soft)]"
                   }`}
                 >
-                  {isSelected ? "Fechar" : "Ver"}
+                  {isMultiSelect
+                    ? isSelected
+                      ? "Marcado"
+                      : "Marcar"
+                    : isSelected
+                      ? "Fechar"
+                      : "Ver"}
                 </span>
               </div>
 

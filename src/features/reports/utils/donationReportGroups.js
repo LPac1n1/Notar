@@ -27,7 +27,16 @@ function addPersonToDemandGroup(group, summary) {
     adjustmentRangeStartMonth: "",
     adjustmentRangeEndMonth: "",
     adjustmentSubsumesMonth: false,
+    // Quanto veio de cada mês. As colunas mostram o total do período; sem
+    // esta quebra, um relatório de vários meses não diria de onde veio o
+    // número que o doador vai ler.
+    monthsByRef: new Map(),
   };
+
+  // Quanto ESTE resumo acrescenta à pessoa. O detalhe por mês usa o mesmo
+  // número das colunas, então os dois nunca se contradizem.
+  let addedNotes = 0;
+  let addedAmount = 0;
 
   if (summary.hasAdjustment && summary.adjustment) {
     const adjustmentNotes = Number(summary.adjustment.notesCount ?? 0);
@@ -38,10 +47,17 @@ function addPersonToDemandGroup(group, summary) {
       currentPerson.abatementAmount = Number(summary.abatementAmount ?? 0);
       currentPerson.adjustmentNotesCount = adjustmentNotes;
       currentPerson.adjustmentSubsumesMonth = true;
+      // O acumulado SUBSTITUI os totais da pessoa (consolida os meses que
+      // cobre), então o detalhe anterior sai junto para não contar duas vezes.
+      currentPerson.monthsByRef.clear();
+      addedNotes = adjustmentNotes;
+      addedAmount = Number(summary.abatementAmount ?? 0);
     } else if (!currentPerson.adjustmentSubsumesMonth) {
-      currentPerson.notesCount += Number(summary.notesCount ?? 0);
+      addedNotes = Number(summary.notesCount ?? 0);
+      addedAmount = Number(summary.abatementAmount ?? 0);
+      currentPerson.notesCount += addedNotes;
       currentPerson.monthNotesCount += Number(summary.monthNotesCount ?? 0);
-      currentPerson.abatementAmount += Number(summary.abatementAmount ?? 0);
+      currentPerson.abatementAmount += addedAmount;
       currentPerson.adjustmentNotesCount += adjustmentNotes;
     }
 
@@ -58,12 +74,38 @@ function addPersonToDemandGroup(group, summary) {
     }
   } else if (!currentPerson.adjustmentSubsumesMonth) {
     const notesCount = Number(summary.notesCount ?? 0);
+    addedNotes = notesCount;
+    addedAmount = Number(summary.abatementAmount ?? 0);
     currentPerson.notesCount += notesCount;
     currentPerson.monthNotesCount += notesCount;
-    currentPerson.abatementAmount += Number(summary.abatementAmount ?? 0);
+    currentPerson.abatementAmount += addedAmount;
+  }
+
+  if (summary.referenceMonth && (addedNotes !== 0 || addedAmount !== 0)) {
+    const monthKey = String(summary.referenceMonth).slice(0, 7);
+    const month = currentPerson.monthsByRef.get(monthKey) ?? {
+      referenceMonth: monthKey,
+      notesCount: 0,
+      abatementAmount: 0,
+    };
+
+    month.notesCount += addedNotes;
+    month.abatementAmount += addedAmount;
+    currentPerson.monthsByRef.set(monthKey, month);
   }
 
   target.set(summary.donorId, currentPerson);
+}
+
+function finalizePerson(person) {
+  const { monthsByRef, ...rest } = person;
+
+  return {
+    ...rest,
+    months: Array.from(monthsByRef.values()).sort((left, right) =>
+      left.referenceMonth.localeCompare(right.referenceMonth),
+    ),
+  };
 }
 
 export function mapDemandGroups({ demands, summaries }) {
@@ -101,12 +143,12 @@ export function mapDemandGroups({ demands, summaries }) {
   return Array.from(groupsByDemand.values())
     .map((group) => ({
       ...group,
-      holders: Array.from(group.holders.values()).sort((a, b) =>
-        a.name.localeCompare(b.name, "pt-BR"),
-      ),
-      auxiliaries: Array.from(group.auxiliaries.values()).sort((a, b) =>
-        a.name.localeCompare(b.name, "pt-BR"),
-      ),
+      holders: Array.from(group.holders.values())
+        .map(finalizePerson)
+        .sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+      auxiliaries: Array.from(group.auxiliaries.values())
+        .map(finalizePerson)
+        .sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
     }))
     .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"));
 }

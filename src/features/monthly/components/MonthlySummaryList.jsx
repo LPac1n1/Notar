@@ -21,6 +21,7 @@ export default function MonthlySummaryList({
   showReferenceMonth,
   selectedIds,
   onToggleSelect,
+  onDeleteAdjustment,
 }) {
   const resolveReconciliation = (summary) =>
     reconciliationByDonor && summary.donorId
@@ -73,6 +74,7 @@ export default function MonthlySummaryList({
               showReferenceMonth={showReferenceMonth}
               isSelected={isSelected(summary)}
               onToggleSelect={onToggleSelect}
+              onDeleteAdjustment={onDeleteAdjustment}
             />
           ))}
         </GroupSection>
@@ -99,6 +101,7 @@ export default function MonthlySummaryList({
               showReferenceMonth={showReferenceMonth}
               isSelected={isSelected(summary)}
               onToggleSelect={onToggleSelect}
+              onDeleteAdjustment={onDeleteAdjustment}
             />
           ))}
         </GroupSection>

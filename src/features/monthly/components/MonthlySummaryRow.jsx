@@ -21,6 +21,7 @@ function MonthlySummaryRowBase({
   showReferenceMonth = false,
   isSelected = false,
   onToggleSelect,
+  onDeleteAdjustment,
 }) {
   // The streak is a *current-state* metric: it counts back from the most
   // recently imported month. Rendering it on an older month's row would read
@@ -356,6 +357,18 @@ function MonthlySummaryRowBase({
                 Sem doações no mês
               </div>
             )}
+
+            {summary.hasAdjustment && summary.adjustment && onDeleteAdjustment ? (
+              <button
+                type="button"
+                disabled={isUpdating}
+                onClick={() => onDeleteAdjustment(summary)}
+                title="Apaga o lançamento de acumulado deste mês. Os meses que ele cobria voltam a ser pendentes, um a um."
+                className="w-full rounded-md border border-[var(--line)] bg-[var(--surface-strong)] px-3 py-1.5 text-xs font-medium text-[var(--text-soft)] transition hover:border-[var(--line-strong)] hover:text-[var(--text-main)] disabled:cursor-not-allowed disabled:opacity-60 xl:w-[220px]"
+              >
+                Deslançar acumulado
+              </button>
+            ) : null}
 
             <p className="text-xs text-[var(--muted)] xl:text-right">
               {summary.abatementMarkedAt

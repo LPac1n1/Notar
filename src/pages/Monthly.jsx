@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import ConfirmModal from "../components/ui/ConfirmModal";
 import DataSyncSectionLoading from "../components/ui/DataSyncSectionLoading";
 import EmptyState from "../components/ui/EmptyState";
 import FeedbackMessage from "../components/ui/FeedbackMessage";
@@ -23,6 +24,10 @@ import { useConsolidatedMonthlyDonors } from "../features/monthly/hooks/useConso
 import { useMonthlyOverviewMetrics } from "../features/monthly/hooks/useMonthlyOverviewMetrics";
 import { useMonthlyStatusHandlers } from "../features/monthly/hooks/useMonthlyStatusHandlers";
 import { useMonthlyExports } from "../features/monthly/hooks/useMonthlyExports";
+import {
+  createAbatementAdjustment,
+  deleteAbatementAdjustment,
+} from "../services/abatementAdjustmentService";
 import { listImports } from "../services/importService";
 import { listMonthlySummaries } from "../services/monthlyService";
 import {
@@ -31,11 +36,12 @@ import {
 } from "../services/reconciliation/creditReconciliationService";
 import { getDonorInactivityStreakMap } from "../services/monthly/inactivityStreaks";
 import { getAppScrollTop, scrollAppTo } from "../utils/appScroll";
-import { formatMonthYear } from "../utils/date";
+import { formatMonthsSpan, formatMonthYear } from "../utils/date";
 import { formatCpf } from "../utils/cpf";
 import { buildSelectOptions } from "../utils/select";
 import { usePagination } from "../hooks/usePagination";
 import { useDataResource } from "../hooks/useDataResource";
+import { useMutationAction } from "../hooks/useMutationAction";
 import { useDatabaseChangeEffect } from "../hooks/useDatabaseChangeEffect";
 import { useAsync } from "../hooks/useAsync";
 import { useDataSyncFeedback } from "../hooks/useDataSyncFeedback";
@@ -44,6 +50,41 @@ import { useProjectPath } from "../hooks/useProjectPath";
 import { logError } from "../services/logger";
 
 const EMPTY_INACTIVITY = new Map();
+
+/**
+ * Aplica uma seleção de meses aos filtros.
+ *
+ * `referenceMonths` é a fonte da verdade e `referenceMonth` passa a ser
+ * DERIVADO dela — preenchido só quando há exatamente um mês. Com isso:
+ *
+ *   • um mês   → tudo que já existia continua igual (lista por mês, exports,
+ *                planilha do mês), porque `referenceMonth` segue preenchido;
+ *   • dois ou  → `referenceMonth` fica vazio e a tela cai sozinha na visão
+ *     mais       consolidada por doador, que é justamente a visão pedida:
+ *                valores somados, mostrando só os meses escolhidos.
+ *
+ * Os refinamentos que apontam para um doador específico são limpos junto,
+ * como já acontecia ao trocar de mês.
+ */
+function withSelectedMonths(filters, months) {
+  const unique = Array.from(new Set(months.filter(Boolean))).sort();
+
+  return {
+    ...filters,
+    referenceMonths: unique,
+    referenceMonth: unique.length === 1 ? unique[0] : "",
+    donorId: "",
+    cpf: "",
+    demand: "",
+    ...(unique.length === 0
+      ? { abatementStatus: "all", donationActivity: "all" }
+      : {}),
+  };
+}
+
+function isSameMonth(left, right) {
+  return String(left ?? "").slice(0, 7) === String(right ?? "").slice(0, 7);
+}
 
 function normalizeMonthlyFilters(filters) {
   return filters.referenceMonth
@@ -85,6 +126,13 @@ export default function Monthly() {
   // (desabater) ou nenhum. É o status que o modal vai GRAVAR.
   const [bulkModalStatus, setBulkModalStatus] = useState("");
   const [catchUpDonor, setCatchUpDonor] = useState(null);
+  // Modo de seleção do carrossel. Fora dele o clique troca de mês, como
+  // sempre foi; dentro dele o clique marca e desmarca.
+  const [isMultiMonthMode, setIsMultiMonthMode] = useState(false);
+  // Acumulado que o operador pediu para deslançar. O modal confirma antes:
+  // apagar o lançamento devolve vários meses para pendente de uma vez.
+  const [adjustmentToRemove, setAdjustmentToRemove] = useState(null);
+  const [isRemovingAdjustment, setIsRemovingAdjustment] = useState(false);
   // Status sendo gravado em massa agora ("" quando nada). Um booleano só não
   // diria qual dos dois botões deve mostrar "carregando".
   const [bulkStatusInProgress, setBulkStatusInProgress] = useState("");
@@ -193,7 +241,11 @@ export default function Monthly() {
       setFilters((current) =>
         current.referenceMonth
           ? current
-          : { ...current, referenceMonth: mostRecentMonth },
+          : {
+              ...current,
+              referenceMonth: mostRecentMonth,
+              referenceMonths: [mostRecentMonth],
+            },
       );
     }
   }
@@ -476,8 +528,71 @@ export default function Monthly() {
     });
   }, []);
 
+  const runAdjustmentMutation = useMutationAction({
+    setError,
+    setSuccessMessage,
+    setSuccessAction,
+    setBusy: setIsRemovingAdjustment,
+    reload: reloadSummaries,
+  });
+
+  const handleRequestRemoveAdjustment = useCallback((adjustment, donorName) => {
+    if (!adjustment?.id) {
+      return;
+    }
+
+    setAdjustmentToRemove({ adjustment, donorName: donorName ?? "" });
+  }, []);
+
+  const handleConfirmRemoveAdjustment = async () => {
+    const adjustment = adjustmentToRemove?.adjustment;
+    const donorName = adjustmentToRemove?.donorName ?? "";
+
+    if (!adjustment?.id) {
+      return;
+    }
+
+    await runAdjustmentMutation({
+      scope: "MonthlyPage.deleteAdjustment",
+      run: () => deleteAbatementAdjustment(adjustment.id, { donorName }),
+      successMessage: `Acumulado de ${formatMonthYear(adjustment.referenceMonth)} deslançado. Os meses que ele cobria voltaram a ser pendentes.`,
+      errorMessage: "Não foi possível deslançar o acumulado.",
+      onSuccess: () => setAdjustmentToRemove(null),
+      // Desfazer recria o mesmo lançamento: o acumulado é uma linha de tabela
+      // própria, derivada dos meses que cobre, então nada se perde ao apagar.
+      undo: async () => {
+        try {
+          await createAbatementAdjustment({
+            donorId: adjustment.donorId,
+            referenceMonth: adjustment.referenceMonth,
+            rangeStartMonth: adjustment.rangeStartMonth,
+            rangeEndMonth: adjustment.rangeEndMonth,
+            notesCount: adjustment.notesCount,
+            abatementAmount: adjustment.abatementAmount,
+            description: adjustment.description,
+            donorName,
+          });
+          await reloadSummaries();
+          setSuccessMessage("Lançamento de acumulado restaurado.");
+        } catch (err) {
+          logError("MonthlyPage.undoDeleteAdjustment", err);
+          setError("Não foi possível restaurar o lançamento de acumulado.");
+        }
+      },
+    });
+  };
+
   const handleFilterChange = (event) => {
     const { name, value } = event.target;
+
+    // O campo de mês da barra de filtros é seleção única: escrever nele
+    // substitui o que estiver marcado no carrossel.
+    if (name === "referenceMonth") {
+      setFilters((current) =>
+        withSelectedMonths(current, value ? [value] : []),
+      );
+      return;
+    }
     setFilters((current) => ({
       ...current,
       ...(name === "referenceMonth"
@@ -522,13 +637,23 @@ export default function Monthly() {
       return;
     }
 
-    setFilters((current) => ({
-      ...current,
-      referenceMonth,
-      donorId: "",
-      cpf: "",
-      demand: "",
-    }));
+    setFilters((current) => withSelectedMonths(current, [referenceMonth]));
+  };
+
+  // No modo "selecionar vários" o clique acrescenta ou tira aquele mês.
+  const handleToggleImportedMonth = (referenceMonth) => {
+    setFilters((current) => {
+      const selected = current.referenceMonths ?? [];
+      const next = selected.some((month) => isSameMonth(month, referenceMonth))
+        ? selected.filter((month) => !isSameMonth(month, referenceMonth))
+        : [...selected, referenceMonth];
+
+      return withSelectedMonths(current, next);
+    });
+  };
+
+  const handleToggleMultiMonthMode = () => {
+    setIsMultiMonthMode((current) => !current);
   };
 
   const {
@@ -542,8 +667,13 @@ export default function Monthly() {
     abatementStatus: filters.abatementStatus,
     summaries,
   });
-  const selectedImport = availableImports.find(
-    (item) => item.referenceMonth.slice(0, 7) === filters.referenceMonth,
+  const selectedMonths = filters.referenceMonths ?? [];
+  const hasAnySelectedMonth = selectedMonths.length > 0;
+  const selectedMonthsLabel = formatMonthsSpan(selectedMonths);
+  // Compara os dois lados pelo mês: o carrossel entrega a data completa
+  // ("2026-03-01") e o campo de filtro entrega "2026-03".
+  const selectedImport = availableImports.find((item) =>
+    isSameMonth(item.referenceMonth, filters.referenceMonth),
   );
   const isDataSyncRefreshLoading =
     dataSyncFeedback.isActive ||
@@ -632,6 +762,7 @@ export default function Monthly() {
             ato de scroll-find-no-carrossel a cada navegação. */}
         <MonthSwitcher
           selectedReferenceMonth={filters.referenceMonth}
+          selectedMonthsCount={selectedMonths.length}
           availableImports={availableImports}
           onSelectMonth={handleSelectImportedMonth}
         />
@@ -678,8 +809,11 @@ export default function Monthly() {
         ) : (
           <ImportedMonthsCarousel
             imports={availableImports}
-            selectedReferenceMonth={filters.referenceMonth}
+            selectedReferenceMonths={selectedMonths}
+            isMultiSelect={isMultiMonthMode}
+            onToggleMultiSelect={handleToggleMultiMonthMode}
             onSelectMonth={handleSelectImportedMonth}
+            onToggleMonth={handleToggleImportedMonth}
           />
         )}
 
@@ -701,7 +835,7 @@ export default function Monthly() {
           isExportingReconciliation={isExportingReconciliation}
           isExportingAbatementSheet={isExportingAbatementSheet}
           isPdfDisabled={summaries.length === 0}
-          hasSelectedReferenceMonth={hasSelectedReferenceMonth}
+          hasSelectedReferenceMonth={hasAnySelectedMonth}
         />
 
         {selectedImport ? (
@@ -751,7 +885,11 @@ export default function Monthly() {
           ) : (
             <ConsolidatedPendingDonors
               donors={filteredConsolidatedDonors}
+              selectedMonthsLabel={hasAnySelectedMonth ? selectedMonthsLabel : ""}
               onCatchUp={handleOpenCatchUp}
+              onDeleteAdjustment={(donor, adjustment) =>
+                handleRequestRemoveAdjustment(adjustment, donor.donorName)
+              }
               onOpenDonor={handleOpenDonorProfile}
               onStatusChange={handleConsolidatedDonorStatusChange}
               updatingDonorId={updatingDonorId}
@@ -801,6 +939,12 @@ export default function Monthly() {
               showReferenceMonth={!hasSelectedReferenceMonth}
               selectedIds={selectedIds}
               onToggleSelect={handleToggleSelect}
+              onDeleteAdjustment={(summary) =>
+                handleRequestRemoveAdjustment(
+                  summary.adjustment,
+                  summary.donorName,
+                )
+              }
             />
           </>
         )}
@@ -818,6 +962,18 @@ export default function Monthly() {
           }
           onClose={() => setBulkModalStatus("")}
           isApplying={bulkStatusInProgress === bulkModalStatus}
+        />
+      ) : null}
+
+      {adjustmentToRemove ? (
+        <ConfirmModal
+          title="Deslançar acumulado"
+          description={`O lançamento de ${formatMonthYear(adjustmentToRemove.adjustment.referenceMonth)} de ${adjustmentToRemove.donorName || "este doador"} será apagado. Os meses que ele cobria voltam a aparecer como pendentes, um a um.`}
+          confirmLabel="Deslançar"
+          isLoading={isRemovingAdjustment}
+          loadingMessage="Deslançando..."
+          onClose={() => setAdjustmentToRemove(null)}
+          onConfirm={handleConfirmRemoveAdjustment}
         />
       ) : null}
 

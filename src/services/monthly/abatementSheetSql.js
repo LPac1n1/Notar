@@ -98,6 +98,76 @@ export function buildAbatementSheetSql(projectId) {
 }
 
 /**
+ * Todo mês em que cada CPF teve nota válida, em qualquer status e projeto.
+ *
+ * A descrição usa a diferença entre isto e os meses da planilha: um mês do
+ * meio que teve doação e ficou de fora (abatido antes, ou não escolhido)
+ * parte o "até"; um mês do meio sem doação é atravessado por ele.
+ */
+const CPF_DONATION_MONTHS_CTE = `
+  WITH cpf_donation_months AS (
+    SELECT
+      import_cpf_summary.cpf AS cpf,
+      string_agg(
+        DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
+        ','
+      ) AS donation_months
+    FROM import_cpf_summary
+    INNER JOIN imports
+      ON imports.id = import_cpf_summary.import_id
+    WHERE import_cpf_summary.notes_count > 0
+      AND imports.status = 'processed'
+    GROUP BY import_cpf_summary.cpf
+  )`;
+
+// Colunas das planilhas que somam MAIS DE UM mês numa linha: os meses
+// somados, o mais recente deles (de onde sai a DATA) e os meses com doação.
+const SHEET_MULTI_MONTH_COLUMNS = `
+    string_agg(
+      DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
+      ','
+    ) AS reference_months,
+    strftime(max(import_cpf_summary.reference_month), '%Y-%m-01') AS last_month,
+    -- Uma linha por CPF na CTE, então o max só tira o valor do agrupamento.
+    max(cpf_donation_months.donation_months) AS donation_months`;
+
+const SHEET_DONATION_MONTHS_JOIN = `
+  LEFT JOIN cpf_donation_months
+    ON cpf_donation_months.cpf = donor_cpf_links.cpf`;
+
+/**
+ * Planilha dos meses ESCOLHIDOS na Gestão Mensal, somados por CPF.
+ *
+ * Mesma forma da planilha de pendentes — uma linha por CPF, VALOR somado e
+ * descrição nomeando o conjunto —, mas o recorte aqui é a seleção do
+ * operador, não o status: mês já realizado entra se estiver marcado, porque
+ * quem decide o período é quem exporta.
+ *
+ * Recebe um `?` por mês, na ordem em que forem passados.
+ */
+export function buildMonthsAbatementSheetSql(projectId, monthCount) {
+  const placeholders = Array.from(
+    { length: Math.max(1, Number(monthCount) || 0) },
+    () => "?",
+  ).join(", ");
+
+  return `
+  ${CPF_DONATION_MONTHS_CTE}
+  SELECT ${SHEET_COLUMNS},${SHEET_MULTI_MONTH_COLUMNS}
+  ${SHEET_FROM}
+  ${SHEET_DONATION_MONTHS_JOIN}
+  WHERE import_cpf_summary.reference_month IN (${placeholders})
+    AND import_cpf_summary.notes_count > 0
+    AND ${donorBelongedToProjectAtMonth(
+      "donors.id",
+      "import_cpf_summary.reference_month",
+      projectId,
+    )}
+  ${SHEET_GROUP_AND_ORDER}
+`;
+}
+
+/**
  * Planilha de TODOS os meses ainda pendentes, somados por CPF.
  *
  * Um mês entra quando é uma pendência que a Gestão Mensal deixa o usuário
@@ -125,31 +195,10 @@ export function buildAbatementSheetSql(projectId) {
  */
 export function buildPendingAbatementSheetSql(projectId) {
   return `
-  WITH cpf_donation_months AS (
-    SELECT
-      import_cpf_summary.cpf AS cpf,
-      string_agg(
-        DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
-        ','
-      ) AS donation_months
-    FROM import_cpf_summary
-    INNER JOIN imports
-      ON imports.id = import_cpf_summary.import_id
-    WHERE import_cpf_summary.notes_count > 0
-      AND imports.status = 'processed'
-    GROUP BY import_cpf_summary.cpf
-  )
-  SELECT ${SHEET_COLUMNS},
-    string_agg(
-      DISTINCT strftime(import_cpf_summary.reference_month, '%Y-%m-01'),
-      ','
-    ) AS reference_months,
-    strftime(max(import_cpf_summary.reference_month), '%Y-%m-01') AS last_month,
-    -- Uma linha por CPF na CTE, então o max só tira o valor do agrupamento.
-    max(cpf_donation_months.donation_months) AS donation_months
+  ${CPF_DONATION_MONTHS_CTE}
+  SELECT ${SHEET_COLUMNS},${SHEET_MULTI_MONTH_COLUMNS}
   ${SHEET_FROM}
-  LEFT JOIN cpf_donation_months
-    ON cpf_donation_months.cpf = donor_cpf_links.cpf
+  ${SHEET_DONATION_MONTHS_JOIN}
   WHERE import_cpf_summary.notes_count > 0
     AND ${donorBelongedToProjectAtMonth(
       "donors.id",

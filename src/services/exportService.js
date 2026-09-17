@@ -1,6 +1,7 @@
 import { listDonors } from "./donorService.js";
 import {
   listAbatementSheetRows,
+  listMonthsAbatementSheetRows,
   listPendingAbatementSheetRows,
 } from "./monthly/abatementSheet.js";
 import { buildAbatementWorkbookBytes } from "./monthly/abatementSheetWorkbook.js";
@@ -233,21 +234,44 @@ export async function exportReconciliationPairsCsv(filters = {}) {
  * Com mais de uma demanda os arquivos vão num .zip (mesmo padrão dos
  * relatórios PDF/JPEG por demanda); com uma só, baixa a planilha direto.
  *
- * Sem mês, sai a planilha de TODOS os meses pendentes, somados por CPF. Não
- * fica ambígua no destino: a descrição de cada linha nomeia os meses que ela
- * soma, e a data sai do mês mais recente daquela linha.
+ * São três recortes, e os dois últimos somam vários meses numa linha por CPF:
+ *
+ *   • um mês selecionado  → a planilha daquele mês;
+ *   • vários selecionados → a soma deles, na ordem escolhida pelo operador;
+ *   • nenhum selecionado  → todos os meses ainda pendentes.
+ *
+ * Somar não fica ambíguo no destino: a descrição de cada linha nomeia os meses
+ * que ela soma, e a data sai do mês mais recente daquela linha.
  */
-export async function exportAbatementSheetWorkbook({ referenceMonth } = {}) {
-  const isPendingSheet = !referenceMonth;
-  const rows = isPendingSheet
-    ? await listPendingAbatementSheetRows()
-    : await listAbatementSheetRows({ referenceMonth });
-  const monthSuffix = isPendingSheet
-    ? "-pendentes"
-    : `-${String(referenceMonth).slice(0, 7)}`;
-  const monthCount = isPendingSheet
-    ? new Set(rows.flatMap((row) => row.referenceMonths ?? [])).size
-    : 1;
+export async function exportAbatementSheetWorkbook({
+  referenceMonth,
+  referenceMonths = [],
+} = {}) {
+  const selectedMonths = Array.from(
+    new Set(
+      (referenceMonths ?? [])
+        .filter(Boolean)
+        .map((month) => String(month).slice(0, 7)),
+    ),
+  ).sort();
+  const isMonthsSheet = selectedMonths.length > 1;
+  const isPendingSheet = !isMonthsSheet && !referenceMonth;
+  const rows = isMonthsSheet
+    ? await listMonthsAbatementSheetRows(selectedMonths)
+    : isPendingSheet
+      ? await listPendingAbatementSheetRows()
+      : await listAbatementSheetRows({ referenceMonth });
+  const monthSuffix = isMonthsSheet
+    ? `-${selectedMonths[0]}-a-${selectedMonths[selectedMonths.length - 1]}`
+    : isPendingSheet
+      ? "-pendentes"
+      : `-${String(referenceMonth).slice(0, 7)}`;
+  // Nas planilhas que somam, o total de meses vem das LINHAS: dois CPFs podem
+  // ter conjuntos diferentes dentro do mesmo arquivo.
+  const monthCount =
+    isMonthsSheet || isPendingSheet
+      ? new Set(rows.flatMap((row) => row.referenceMonths ?? [])).size
+      : 1;
 
   if (rows.length === 0) {
     return {
@@ -256,6 +280,7 @@ export async function exportAbatementSheetWorkbook({ referenceMonth } = {}) {
       monthCount: 0,
       fileNames: [],
       isPendingSheet,
+      isMonthsSheet,
     };
   }
 
@@ -306,6 +331,7 @@ export async function exportAbatementSheetWorkbook({ referenceMonth } = {}) {
     monthCount,
     fileNames: files.map((file) => file.fileName),
     isPendingSheet,
+    isMonthsSheet,
   };
 }
 
