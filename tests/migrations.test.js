@@ -7,6 +7,7 @@ import {
 } from "../src/services/db/migrations.js";
 import { buildDonorInactivityStreaksSql } from "../src/services/monthly/inactivityStreaksSql.js";
 import { buildDonorMonthStatusQuery } from "../src/services/reconciliation/donorMonthStatusSql.js";
+import { CREDIT_RECONCILE_STATEMENTS } from "../src/services/reconciliation/creditReconcileSql.js";
 import { buildRaffleNumbersSql } from "../src/services/raffle/raffleNumbersSql.js";
 import { buildAbatementSheetSql } from "../src/services/monthly/abatementSheetSql.js";
 import { buildAbatementDescription } from "../src/services/monthly/abatementSheetDescription.js";
@@ -918,25 +919,12 @@ test("migration v8 creates credit_reconciliation table and indexes", async () =>
   }
 });
 
-// Helper: runs the exact SQL sequence that `reconcileCredits` issues. The
-// service wraps this in a transaction + notify, neither of which the test
-// connection needs. Keep this in sync with
-// src/services/reconciliation/creditReconciliationService.js — if they
-// drift, the test stops validating the production code path.
+// Roda a conciliação com as instruções de PRODUÇÃO
+// (`creditReconcileSql.js`). O serviço envolve isto em transação e
+// notificação, que a conexão de teste dispensa.
 //
-// As of migration v9, matching pivots on `(match_key, valor_cents)` —
-// dates are stored but no longer participate. The completeKey factory
-// returns a qualified WHERE fragment for the given table alias so JOIN
-// queries with multiple notes tables don't trip an ambiguous reference.
-function completeKey(alias) {
-  return `
-    ${alias}.match_key IS NOT NULL
-    AND ${alias}.match_key <> ''
-    AND ${alias}.match_key NOT LIKE '%|'
-    AND ${alias}.match_key NOT LIKE '|%'
-  `;
-}
-
+// Antes este helper mantinha uma cópia à mão do SQL, com um aviso para
+// "manter em sincronia" — e uma cópia só prova que a cópia funciona.
 async function runCreditReconciliation(conn) {
   // Backfill match_key / valor_cents on whatever the test just inserted.
   // Production code does this at INSERT time in the parser; tests skip the
@@ -955,139 +943,9 @@ async function runCreditReconciliation(conn) {
     WHERE match_key IS NULL OR match_key = ''
   `);
 
-  await conn.query(`DELETE FROM credit_reconciliation`);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      NULL,
-      donation_notes.id,
-      'duplicate_donation',
-      CURRENT_TIMESTAMP
-    FROM donation_notes
-    INNER JOIN (
-      SELECT match_key
-      FROM donation_notes
-      WHERE is_valid = TRUE AND ${completeKey("donation_notes")}
-      GROUP BY match_key
-      HAVING count(*) > 1
-    ) AS donation_duplicates
-      ON donation_duplicates.match_key = donation_notes.match_key
-    WHERE donation_notes.is_valid = TRUE
-  `);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      credit_notes.id,
-      NULL,
-      'duplicate_credit',
-      CURRENT_TIMESTAMP
-    FROM credit_notes
-    INNER JOIN (
-      SELECT match_key
-      FROM credit_notes
-      WHERE is_valid = TRUE AND ${completeKey("credit_notes")}
-      GROUP BY match_key
-      HAVING count(*) > 1
-    ) AS credit_duplicates
-      ON credit_duplicates.match_key = credit_notes.match_key
-    WHERE credit_notes.is_valid = TRUE
-  `);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      credit_notes.id,
-      donation_notes.id,
-      'matched',
-      CURRENT_TIMESTAMP
-    FROM credit_notes
-    INNER JOIN donation_notes
-      ON donation_notes.match_key = credit_notes.match_key
-      AND donation_notes.valor_cents = credit_notes.valor_cents
-    WHERE credit_notes.is_valid = TRUE
-      AND donation_notes.is_valid = TRUE
-      AND ${completeKey("credit_notes")}
-      AND NOT EXISTS (
-        SELECT 1
-        FROM credit_reconciliation
-        WHERE credit_reconciliation.credit_note_id = credit_notes.id
-          OR credit_reconciliation.donation_note_id = donation_notes.id
-      )
-  `);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      credit_notes.id,
-      donation_notes.id,
-      'divergent',
-      CURRENT_TIMESTAMP
-    FROM credit_notes
-    INNER JOIN donation_notes
-      ON donation_notes.match_key = credit_notes.match_key
-      AND donation_notes.valor_cents <> credit_notes.valor_cents
-    WHERE credit_notes.is_valid = TRUE
-      AND donation_notes.is_valid = TRUE
-      AND ${completeKey("credit_notes")}
-      AND NOT EXISTS (
-        SELECT 1
-        FROM credit_reconciliation
-        WHERE credit_reconciliation.credit_note_id = credit_notes.id
-          OR credit_reconciliation.donation_note_id = donation_notes.id
-      )
-  `);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      credit_notes.id,
-      NULL,
-      'credit_only',
-      CURRENT_TIMESTAMP
-    FROM credit_notes
-    WHERE credit_notes.is_valid = TRUE
-      AND NOT EXISTS (
-        SELECT 1
-        FROM credit_reconciliation
-        WHERE credit_reconciliation.credit_note_id = credit_notes.id
-      )
-  `);
-
-  await conn.query(`
-    INSERT INTO credit_reconciliation (
-      id, credit_note_id, donation_note_id, match_status, created_at
-    )
-    SELECT
-      CAST(uuid() AS VARCHAR),
-      NULL,
-      donation_notes.id,
-      'donation_only',
-      CURRENT_TIMESTAMP
-    FROM donation_notes
-    WHERE donation_notes.is_valid = TRUE
-      AND NOT EXISTS (
-        SELECT 1
-        FROM credit_reconciliation
-        WHERE credit_reconciliation.donation_note_id = donation_notes.id
-      )
-  `);
+  for (const statement of CREDIT_RECONCILE_STATEMENTS) {
+    await conn.query(statement);
+  }
 }
 
 async function countReconciliationByStatus(conn) {
