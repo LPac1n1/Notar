@@ -12,19 +12,24 @@ import {
  *
  * Os testes de `migrations.test.js` conferem CONTAGENS por status. Aqui o
  * resultado é conferido NOTA A NOTA — qual nota caiu em qual status e com
- * quem foi pareada —, porque é isso que precisa continuar igual quando o SQL
- * for reescrito para ficar mais rápido: duas versões podem dar as mesmas
+ * quem foi pareada —, porque duas versões do SQL podem dar as mesmas
  * contagens pareando notas diferentes.
+ *
+ * A regra que estes casos fixam: CNPJ + número não identifica uma nota (o
+ * mesmo número se repete em séries diferentes), então a REPETIÇÃO só existe
+ * quando o valor também é igual. Notas de mesma chave e valores diferentes
+ * são notas distintas, e cada uma procura o próprio par.
  */
 
 // (id, cnpj, número, valor, válida?)
 const DONATIONS = [
   ["d-match", "11111111000111", "1", 10.0, true],
   ["d-div", "22222222000122", "2", 20.0, true],
-  // Mesma chave, valores diferentes.
+  // Mesma chave, valores diferentes: são duas notas. A de 30 tem crédito
+  // correspondente; a de 35, não.
   ["d-dup1", "33333333000133", "3", 30.0, true],
   ["d-dup2", "33333333000133", "3", 35.0, true],
-  // Uma doação só; a repetição está do lado do crédito.
+  // Uma doação só; do lado do crédito há duas notas com a chave dela.
   ["d-single", "44444444000144", "4", 40.0, true],
   // Repetida dos dois lados, linhas idênticas.
   ["d-both1", "55555555000155", "5", 50.0, true],
@@ -37,6 +42,20 @@ const DONATIONS = [
   ["d-nocnpj1", "", "8", 80.0, true],
   ["d-nocnpj2", "", "8", 80.0, true],
   ["d-nonum", "99999999000199", "", 90.0, true],
+  // Duas linhas iguais em chave E valor (repetidas de verdade) convivendo
+  // com uma terceira nota da mesma chave, de outro valor, que tem par.
+  ["d-tri1", "10101010000110", "9", 90.0, true],
+  ["d-tri2", "10101010000110", "9", 90.0, true],
+  ["d-tri3", "10101010000110", "9", 95.0, true],
+  // Duas de cada lado sob a mesma chave, nenhum valor coincide: NÃO pode
+  // virar "valor diferente" — seriam quatro pares para quatro notas.
+  ["d-k1", "12121212000112", "10", 100.0, true],
+  ["d-k2", "12121212000112", "10", 110.0, true],
+  // Duas de cada lado, valores coincidem dois a dois: dois pares.
+  ["d-l1", "13131313000113", "11", 100.0, true],
+  ["d-l2", "13131313000113", "11", 200.0, true],
+  // Uma doação contra dois créditos de outros valores: sem par.
+  ["d-n", "14141414000114", "12", 10.0, true],
 ];
 
 const CREDITS = [
@@ -52,6 +71,14 @@ const CREDITS = [
   ["c-orphan", "77777777000177", "7", 70.0, true],
   // Mesma chave incompleta e mesmo valor das doações sem CNPJ.
   ["c-nocnpj", "", "8", 80.0, true],
+  ["c-tri", "10101010000110", "9", 90.0, true],
+  ["c-tri3", "10101010000110", "9", 95.0, true],
+  ["c-k1", "12121212000112", "10", 120.0, true],
+  ["c-k2", "12121212000112", "10", 130.0, true],
+  ["c-l1", "13131313000113", "11", 100.0, true],
+  ["c-l2", "13131313000113", "11", 200.0, true],
+  ["c-n1", "14141414000114", "12", 20.0, true],
+  ["c-n2", "14141414000114", "12", 30.0, true],
 ];
 
 const sqlText = (value) => `'${value}'`;
@@ -108,24 +135,45 @@ async function readOutcome(conn) {
 }
 
 const EXPECTED_OUTCOME = [
-  "credit_only - c-dup-single",
-  "credit_only - c-nocnpj",
-  "credit_only - c-orphan",
+  // Uma nota de cada lado, mesmo valor.
+  "matched d-match c-match",
+  // Uma nota de cada lado, valor diferente.
   "divergent d-div c-div",
+  // Mesma chave, valores diferentes: cada nota procura o próprio par.
+  "matched d-dup1 c-dup-single",
+  "donation_only d-dup2 -",
+  "matched d-single c-dc1",
+  "credit_only - c-dc2",
+  // Iguais em chave e valor, dos dois lados: ambíguas, ninguém pareia.
+  "duplicate_donation d-both1 -",
+  "duplicate_donation d-both2 -",
+  "duplicate_credit - c-both1",
+  "duplicate_credit - c-both2",
+  // Repetidas só na doação: o crédito de mesmo valor fica sem par, mas a
+  // nota de outro valor sob a mesma chave pareia normalmente.
+  "duplicate_donation d-tri1 -",
+  "duplicate_donation d-tri2 -",
+  "credit_only - c-tri",
+  "matched d-tri3 c-tri3",
+  // Várias notas por lado e nenhum valor coincide: todas sem par, e
+  // nenhuma linha de "valor diferente".
+  "donation_only d-k1 -",
+  "donation_only d-k2 -",
+  "credit_only - c-k1",
+  "credit_only - c-k2",
+  "matched d-l1 c-l1",
+  "matched d-l2 c-l2",
+  "donation_only d-n -",
+  "credit_only - c-n1",
+  "credit_only - c-n2",
+  // Sem contraparte nenhuma.
+  "donation_only d-orphan -",
+  "credit_only - c-orphan",
+  // Chave incompleta nunca pareia, mesmo coincidindo em tudo.
   "donation_only d-nocnpj1 -",
   "donation_only d-nocnpj2 -",
   "donation_only d-nonum -",
-  "donation_only d-orphan -",
-  "donation_only d-single -",
-  "duplicate_credit - c-both1",
-  "duplicate_credit - c-both2",
-  "duplicate_credit - c-dc1",
-  "duplicate_credit - c-dc2",
-  "duplicate_donation d-both1 -",
-  "duplicate_donation d-both2 -",
-  "duplicate_donation d-dup1 -",
-  "duplicate_donation d-dup2 -",
-  "matched d-match c-match",
+  "credit_only - c-nocnpj",
 ].sort();
 
 test("conciliação: cada nota cai no status esperado, com o par esperado", async () => {
