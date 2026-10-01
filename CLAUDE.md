@@ -685,9 +685,24 @@ Três pedidos do usuário: poder deslançar acumulados, selecionar vários meses
 - Testes: 259 (6 novos — 2 de integração da planilha dos meses escolhidos, 4 unitários do detalhe por mês), 96 e2e (4 novos: soma no card, planilha somada, período no nome do relatório, e deslançar devolvendo os meses a pendente). Verificado por mutação: apagar o recorte de meses da consulta e não limpar o detalhe no acumulado fazem os testes falharem.
 - **Armadilha registrada**: `Write` sobrescreve arquivo existente sem avisar no meio do fluxo — `tests/donationReportGroups.test.js` já existia e perdeu 4 testes, o que só apareceu porque a CONTAGEM da suíte não bateu (255 em vez de 259). Recuperado com `git checkout HEAD -- <arquivo>` e os novos testes acrescentados ao lado dos antigos. Conferir a contagem depois de mexer em testes.
 
+## Reconhecimento do sistema + conciliação com os dados reais (commits 300-305)
+
+Sessão de reconhecimento pedida pelo usuário ("dominar o sistema antes de mexer"). Gerou dois documentos na raiz — `CODEBASE.md` (guia do código) e `DIAGNOSTICO.md` (achados medidos + roteiro) — e três correções na conciliação. **O detalhe e os números estão no DIAGNOSTICO.md; aqui fica só o que muda como se trabalha.**
+
+- **A pasta em uso roda `npm run dev`.** O banco vive na memória da aba, então editar `src/` aqui recarrega a página e apaga o que não sincronizou. Este trabalho foi feito num worktree (`git worktree add`, branch `correcoes-conciliacao`) e só entra na pasta por `git merge --ff-only`, com backup exportado antes.
+- **Volume real**: 304 mil notas de doação, arquivo de 45,6 MB na nuvem, a 4 MB do limite de 50 MB do plano gratuito. O volume explodiu em out/2025 (87 mil notas só em mai/2026). As estimativas antigas deste arquivo ("0,34 MB com um ano de uso", "sincronização incremental quando passar de 5 MB") foram escritas para o volume anterior e **não valem mais**.
+- **Commit 301** — SQL da conciliação extraído para `reconciliation/creditReconcileSql.js` (módulo puro; extração conferida instrução por instrução contra o original). `tests/creditReconcile.test.js` confere o resultado **nota a nota**; o helper de `migrations.test.js` deixou de manter uma cópia à mão do SQL.
+- **Commit 302** — `NOT EXISTS (… A OR B)` virou dois `NOT EXISTS` com `AND` nos passos `matched` e `divergent`. Mesma lógica; no banco real a conciliação foi de 707 s para 7,2 s com resultado idêntico ao centavo. O `OR` impedia junção por igualdade assim que havia muitas linhas de "repetidas" na tabela — por isso os dados sintéticos (sem repetidas) nunca mostraram o problema.
+- **Commit 303** — a repetição passou a ser checada por CNPJ + número + **valor** (confirmado com o usuário: mesma chave com valor diferente é outra nota). No banco real, 57.345 notas e R$ 28.683,83 de crédito saem de "Repetidas" e conciliam. `divergent` continua exigindo uma nota só de cada lado sob a chave; sem isso há pares cruzados e crédito em dobro (verificado por mutação).
+- **Armadilha de medição**: dado sintético "limpo" esconde o caso patológico. Para qualquer coisa que dependa da forma do dado, medir com o `dados.json` real baixado do bucket, em modo local, imprimindo só agregados (as mensagens de erro em `action_history` contêm nomes de doadores).
+- **Armadilha de shell**: encadear com `;` depois de um `cd` que falhou roda o resto na pasta errada — um `npm ci` quase rodou na pasta em uso. Usar `&&`.
+- 263 testes, 96/96 e2e (com `--workers=2`; em paralelo total 2–4 falham por carga, diferentes a cada rodada), lint 0 erros, build OK.
+
+**Próximo passo acordado no roteiro, ainda não autorizado:** etapa 1b — tirar `credit_reconciliation` do snapshot (tabela derivada, 38% do arquivo) e interromper o laço "falha de upload → registro do erro → novo upload" (S14, reproduzido).
+
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 299**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 305**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.
