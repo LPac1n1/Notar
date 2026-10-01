@@ -30,6 +30,32 @@ export function completeKeyCondition(alias) {
 }
 
 /**
+ * "Nem este crédito nem esta doação já foram classificados."
+ *
+ * São DOIS `NOT EXISTS` ligados por `AND`, e não um só com `OR` dentro.
+ * As duas formas dizem a mesma coisa — `não (A ou B)` é `(não A) e (não B)` —
+ * mas o banco só consegue resolver por junção de igualdade a segunda. Com o
+ * `OR`, cada par candidato era comparado contra a tabela inteira: no banco
+ * real (304 mil doações, 115 mil linhas já em "repetidas") a conciliação
+ * levava 707 s. Com a forma abaixo, 9,7 s, com o mesmo resultado nos seis
+ * status.
+ *
+ * Um fragmento só, usado nos dois passos que precisam dele, para as duas
+ * cópias não divergirem.
+ */
+const NEITHER_NOTE_IS_RECONCILED = `
+          NOT EXISTS (
+            SELECT 1
+            FROM credit_reconciliation
+            WHERE credit_reconciliation.credit_note_id = credit_notes.id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM credit_reconciliation
+            WHERE credit_reconciliation.donation_note_id = donation_notes.id
+          )`;
+
+/**
  * Os passos da reconstrução, NA ORDEM em que precisam rodar.
  *
  * A ordem é a regra: cada passo só pega o que os anteriores deixaram, então
@@ -119,12 +145,7 @@ export const CREDIT_RECONCILE_STEPS = [
         WHERE credit_notes.is_valid = TRUE
           AND donation_notes.is_valid = TRUE
           AND ${completeKeyCondition("credit_notes")}
-          AND NOT EXISTS (
-            SELECT 1
-            FROM credit_reconciliation
-            WHERE credit_reconciliation.credit_note_id = credit_notes.id
-              OR credit_reconciliation.donation_note_id = donation_notes.id
-          )
+          AND ${NEITHER_NOTE_IS_RECONCILED}
       `,
   },
   {
@@ -148,12 +169,7 @@ export const CREDIT_RECONCILE_STEPS = [
         WHERE credit_notes.is_valid = TRUE
           AND donation_notes.is_valid = TRUE
           AND ${completeKeyCondition("credit_notes")}
-          AND NOT EXISTS (
-            SELECT 1
-            FROM credit_reconciliation
-            WHERE credit_reconciliation.credit_note_id = credit_notes.id
-              OR credit_reconciliation.donation_note_id = donation_notes.id
-          )
+          AND ${NEITHER_NOTE_IS_RECONCILED}
       `,
   },
   {
