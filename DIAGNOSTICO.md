@@ -5,6 +5,21 @@
 > fora do repositório, contra dados sintéticos e um storage falso local — o
 > Supabase real e os dados reais não foram tocados.
 
+**Situação das correções** (atualizado em 01/10/2026, commit 304)
+
+| Item | Estado | Commit |
+|---|---|---|
+| I1 — conciliação quadrática | **Corrigido.** 707 s → 7,2 s no banco real, resultado idêntico ao centavo | 301 (extração + teste), 302 |
+| R1 — "Repetidas" ignorava o valor | **Corrigido.** 57.345 notas e R$ 28.683,83 de crédito passam a conciliar | 303 |
+| S12/S13 — limite de 50 MB | **Aberto — é o que impede a sincronização hoje** | — |
+| S14 — falha de upload em laço | **Aberto** | — |
+| S1, S2 — sincronização que mente | Aberto | — |
+| S0, S3 — formato do snapshot | Aberto | — |
+
+As correções estão no branch `correcoes-conciliacao`. Para os números do
+banco existente mudarem, é preciso rodar a conciliação uma vez depois de
+aplicar (botão "Re-rodar conciliação" em Importações, ou a próxima importação).
+
 **Legenda de confiança**
 
 | Marca | Significa |
@@ -71,7 +86,7 @@ documentação interna é incomumente boa.
 
 | Verificação | Resultado |
 |---|---|
-| `npm test` | **259/259** em ~105 s |
+| `npm test` | **263/263** (259 no commit 299; +4 do teste nota a nota da conciliação) |
 | `npm run lint` | 0 erros, 0 avisos |
 | `npm run build` | ok em 1,5 s; 1 aviso (`INEFFECTIVE_DYNAMIC_IMPORT`) |
 | `npm run test:e2e` | não rodava: o Playwright 1.59.1 pede o Chromium build 1217 e só havia o 1243. Instalado depois, com autorização — resultado na linha abaixo |
@@ -146,11 +161,20 @@ número tem margem de dezenas de segundos, não de ordem de grandeza.
 
 | # | Achado | Conf. | Impacto | Esforço |
 |---|---|---|---|---|
-| **I1** | **Uma condição `OR` torna a conciliação quadrática.** Em `creditReconcileEngine.js`, os passos `matched` e `divergent` usam `NOT EXISTS (… WHERE credit_note_id = X OR donation_note_id = Y)`. Com 115 mil linhas de "repetidas" já na tabela, o banco não consegue usar junção por igualdade. Trocar por dois `NOT EXISTS` ligados por `AND` é a mesma lógica (`NÃO (A OU B)` = `NÃO A E NÃO B`). Medido no banco real: **707 s → 9,7 s**, e as contagens dos seis status bateram exatamente com as gravadas no arquivo. Roda em toda importação, reimportação e exclusão. | Reproduzido (dados reais) | **A** | **B** |
-| **R1** | **A checagem de repetição ignora o valor.** A documentação diz que a chave é CNPJ + número + valor, mas os passos `duplicate_*` agrupam só por `match_key` (CNPJ + número). Resultado no banco real: 57.432 doações e 57.432 créditos em "Repetidas", em 24.066 grupos — e em 24.040 deles os valores **diferem**. Com o valor na chave, 57.345 pareariam uma a uma. Só 19 grupos são linhas realmente idênticas. Crédito parado ali: **R$ 28.749** contra R$ 289.998 conciliados. Por mês: 1.214 em out/2025, 13.237 em abr/2026, 21.300 em mai/2026. | Medido (dados reais) | **A** — é regra de negócio; precisa da sua confirmação | **M** |
+| **I1** | ✅ **Corrigido no commit 302.** Uma condição `OR` tornava a conciliação quadrática: os passos `matched` e `divergent` usavam `NOT EXISTS (… WHERE credit_note_id = X OR donation_note_id = Y)`, e com 115 mil linhas de "repetidas" já na tabela o banco não conseguia usar junção por igualdade. Virou dois `NOT EXISTS` ligados por `AND` (`NÃO (A OU B)` = `NÃO A E NÃO B`). O SQL saiu do motor para `reconciliation/creditReconcileSql.js` (commit 301, extração provada idêntica instrução por instrução) e ganhou um teste que confere o resultado **nota a nota**. No banco real, pelo código de produção: **707 s → 7,2 s**, mesmas contagens nos seis status e mesmo crédito por status, ao centavo. | Reproduzido (dados reais) | **A** | **B** |
+| **R1** | ✅ **Corrigido no commit 303**, com a confirmação do usuário de que mesma chave com valor diferente é outra nota. A repetição passou a ser checada por CNPJ + número + **valor**. `divergent` continua exigindo uma única nota de cada lado sob a chave — sem isso, várias notas sem par gerariam pares cruzados e crédito contado em dobro (o teste falha se essa restrição for removida). No banco real: conciliadas 190.264 → **247.609**; repetidas 57.432 → **87** de cada lado; crédito conciliado R$ 289.998,15 → **R$ 318.681,98**. `credit_only` (1.728), `donation_only` (27) e `divergent` (12) não mudaram, o crédito total se conserva (R$ 318.916,41) e cada nota válida aparece exatamente uma vez. | Reproduzido (dados reais) | **A** | **M** |
 | **S12** | **O limite de 50 MB do plano gratuito chega antes do limite de string.** Arquivo em 45,6 MB; maio/2026 sozinho acrescentou ~12 MB. | Medido / Suposição sobre o limite exato do plano | **Crítico** | — |
 | **S13** | **`credit_reconciliation` vai no snapshot sem precisar.** É tabela derivada, reconstruída inteira pela conciliação, e responde por 21% do JSON e **38% do arquivo comprimido** (são três UUIDs aleatórios por linha, que não comprimem). Tirá-la e reconstruir ao abrir — o que só é viável depois de I1 — leva o arquivo de 43,4 para 26,8 MiB. | Medido | **A** como fôlego imediato | **B–M** |
 | **SEC11** | As mensagens de erro gravadas em `action_history` incluem o nome do doador (ex.: "Este CPF já está vinculado a …"). O log de erros exportável em Configurações carrega esses nomes. | Medido | B | B |
+
+**Achados da rodada de correção**
+
+| # | Achado | Conf. | Impacto | Esforço |
+|---|---|---|---|---|
+| **S14** | **Uma falha de upload gera a próxima tentativa, sem parar.** `performUpload` falha → `logError("cloudStorage.upload")` → `createActionHistoryEntry` grava em `action_history` → toda gravação agenda um upload 2 s depois (`scheduleCloudFlush`) → falha de novo. Não há limite nem espera crescente. Cada volta exporta o banco inteiro, congela a tela e tenta subir dezenas de MB. É o comportamento relatado pelo usuário ao importar junho ("ficava dando falha e reiniciando a tentativa, sem parar"), e explica as 42 linhas `cloudStorage.upload` no histórico. Reproduzido contra um storage falso que recusa todo upload: **uma** alteração gerou 13 tentativas em 30 s (uma a cada 2,2 s), 13 erros gravados, e seguia tentando. | Reproduzido | **A** | **B** |
+| **OPS1** | **O app em uso roda de `npm run dev` nesta pasta.** Havia um servidor Vite ativo na porta 5173 durante o trabalho. Como o banco vive na memória da aba, **editar qualquer arquivo de `src/` recarrega a aba e apaga o que não sincronizou**. Por isso as correções foram feitas num worktree fora da pasta. Vale como regra: nunca alterar `src/` na pasta em uso sem um backup exportado. | Medido | **A** | — |
+| **DEP5** | `npm ci` falha nesta máquina (npm 11): `package-lock.json` fora de sincronia (`@emnapi/core` e `@emnapi/runtime` ausentes). O CI usa `npm ci`; não verifiquei se lá passa. | Reproduzido | M se o CI estiver vermelho | B |
+| **OPS2** | Sem identidade de git configurada na máquina (`user.name`/`user.email`). Os commits 300–304 usaram, só na linha de comando, o autor que já aparece no histórico. | Medido | B | B |
 
 ### 3.0b Simulação a 80 mil notas por mês (projeção)
 
@@ -372,23 +396,25 @@ a lentidão → higiene.** Cada etapa é pequena, tem teste antes e número depo
   sincronizar", exportar um backup em Configurações **antes** de fechar ou
   recarregar a aba — o que não subiu só existe ali.
 
-**Etapa 1 — Conciliação rápida** (I1) — *a mudança de melhor custo-benefício*
-- Trocar o `OR` por dois `NOT EXISTS` em `creditReconcileEngine.js` (dois
-  trechos, poucas linhas cada).
-- Antes: teste de integração que fixa o resultado atual da conciliação num
-  conjunto com repetidas, divergentes e órfãs. O teste precisa passar antes e
-  depois.
-- Evidência já obtida: resultado idêntico nos seis status sobre o banco real.
-- Risco: baixo. É uma identidade lógica; o que pode quebrar é erro de
-  transcrição — o teste e a comparação com os dados reais cobrem isso.
+**Etapa 1 — Conciliação rápida** (I1) — ✅ feita (commits 301, 302)
 
-**Etapa 1b — Fôlego antes do limite de 50 MB** (S12, S13)
+**Regra das "Repetidas"** (R1) — ✅ feita (commit 303)
+
+**Aplicar na pasta em uso** — pendente, depende de você
+- Exportar um backup em toda aba aberta do app (OPS1).
+- `git merge --ff-only correcoes-conciliacao` na pasta, e apagar os 4
+  arquivos órfãos.
+- Em Importações, "Re-rodar conciliação" uma vez.
+
+**Etapa 1b — Voltar a sincronizar** (S12, S13, S14) — *a próxima; é o que destrava junho*
 - Parar de gravar `credit_reconciliation` no snapshot e reconstruí-la ao
   abrir. Arquivo cai de 43,4 para 26,8 MiB — uns dois meses de folga.
 - Depende da etapa 1 (sem ela, abrir custaria 12 minutos a mais).
 - Snapshots antigos, que trazem a tabela, continuam abrindo.
-- Alternativa sem código: subir o plano do Supabase. Resolve o limite, não a
-  lentidão.
+- S14: uma falha de sincronização não pode agendar outra. O registro do erro
+  deixa de disparar upload, e a nova tentativa passa a ter espera crescente
+  e limite.
+- Custo zero é requisito (confirmado), então subir de plano está fora.
 
 **Etapa 1c — Parar de perder sincronização** (S1, S2, T1)
 - Transformar o storage falso em teste e2e que falha hoje pelos dois motivos.
@@ -398,12 +424,6 @@ a lentidão → higiene.** Cada etapa é pequena, tem teste antes e número depo
   subir.
 - Risco baixo: ~30 linhas de um arquivo. O teste criado aqui é o que vai
   proteger a troca de formato da etapa 2.
-
-**Decisão sua, antes da etapa 3 — regra das "Repetidas"** (R1)
-- Confirmar se nota com mesmo CNPJ e número, mas valor diferente, é mesmo
-  outra nota. Se for, a repetição passa a ser checada por CNPJ + número +
-  valor e ~57 mil notas entram na conciliação. Muda números que aparecem para
-  o usuário (crédito real por doador), então não faço sem o seu sim.
 
 **Etapa 2 — Trocar o formato do snapshot** (S0, S3, S5, S9 — a etapa que importa)
 - Sair de "um JSON com tudo" para **um arquivo por tabela** (e, nas três
@@ -479,19 +499,25 @@ O que o código não responde. Onde eu tinha um palpite, está marcado.
 - Git: nesta pasta, já criado e apontando para o GitHub.
 - Formato das planilhas: as 64 importações gravadas são CSV.
 
+- Mesma chave com valor diferente é outra nota (R1, corrigido no commit 303).
+- Houve alterações depois de 27/09 que não subiram; junho foi importado
+  várias vezes e a sincronização falha em laço (S14).
+- Custo zero é requisito; alternativas ao Supabase são bem-vindas.
+
 **Em aberto**
 
-1. **Nota com mesmo CNPJ e mesmo número, mas valor diferente, é outra nota?**
-   (R1 — decide o destino de 57 mil notas e R$ 28,7 mil de crédito.)
-2. No computador com "Falha ao sincronizar": houve alteração depois de
-   27/09 (data da última gravação que chegou à nuvem)? Já importou junho?
+1. A aba do app que está aberta agora tem alterações que não subiram?
+   Há um backup exportado dela?
+2. Posso seguir para a etapa 1b (tirar a tabela derivada do snapshot e
+   interromper o laço de falha)?
 3. Você disse que usa CSV e XLSX, mas todas as importações gravadas são CSV.
    O XLSX é convertido antes, ou era de planilhas que foram reimportadas?
 4. **Onde o app está hospedado** em produção? Não há configuração de deploy no
    repositório.
 5. Quantas pessoas usam ao mesmo tempo, em quantos computadores? O aviso
    "Os dados foram atualizados em outro dispositivo" aparece com frequência?
-6. Subir o plano do Supabase é uma opção, ou o custo zero é requisito?
+6. O app é sempre usado por `npm run dev` nesta pasta, em todos os
+   computadores (com o OneDrive levando o código de um para o outro)?
 
 **Negócio**
 

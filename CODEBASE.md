@@ -95,7 +95,7 @@ npm run dev          # http://localhost:5173
 | `npm run dev` | servidor Vite | ok |
 | `npm run build` | build de produção em `dist/` | ok (1,5 s) |
 | `npm run lint` | ESLint | 0 erros, 0 avisos |
-| `npm test` | 36 arquivos, 259 testes (`node --test`) | 259/259, ~105 s |
+| `npm test` | 37 arquivos, 263 testes (`node --test`) | 263/263 |
 | `npm run test:e2e` | 40 specs Playwright (Chromium) | ver seção 10 |
 
 Variáveis (`.env`, nunca versionado):
@@ -105,6 +105,13 @@ VITE_SUPABASE_URL=            VITE_SUPABASE_STORAGE_BUCKET=notar
 VITE_SUPABASE_ANON_KEY=       VITE_SUPABASE_STORAGE_OBJECT=dados.json
 VITE_NOTAR_AUTH_MODE=         # "local" = sem login, sem nuvem, tudo em memória
 ```
+
+**Cuidado com a pasta em uso.** Em 01/10/2026 o sistema era usado no dia a
+dia por `npm run dev` rodando desta própria pasta. O banco vive na memória da
+aba: editar um arquivo de `src/` faz o Vite recarregar a página e **apaga o
+que ainda não sincronizou**. Desenvolva num worktree ou clone separado
+(`git worktree add ../notar-wt -b <branch>`), e só traga as mudanças para cá
+com um backup exportado.
 
 **`VITE_NOTAR_AUTH_MODE=local` desliga a persistência inteira.** É o modo da
 suíte e2e (`playwright.config.js` injeta a variável). Com ele o banco some a
@@ -348,9 +355,16 @@ que é preciso para restaurar), `schema_version`.
 ### Regras de negócio que o schema não mostra
 
 - **Chave de conciliação.** `match_key = <cnpj só dígitos>|<número sem zeros à
-  esquerda>`. `valor_cents` (inteiro) decide entre `matched` (igual) e
-  `divergent` (diferente). A **data não entra** — as duas planilhas divergem
-  nela. Chave repetida de um lado vira `duplicate_*` e **não pareia**.
+  esquerda>`, mais `valor_cents` (inteiro). A **data não entra** — as duas
+  planilhas divergem nela.
+  - CNPJ + número **não** identifica uma nota: o mesmo número se repete em
+    séries diferentes. Notas de mesma chave e valores diferentes são notas
+    distintas, e cada uma procura o par de mesmo valor (`matched`).
+  - `duplicate_*`: mesma chave **e mesmo valor** mais de uma vez do mesmo
+    lado. É ambíguo e **não pareia**.
+  - `divergent`: só quando há **uma única** nota de cada lado sob a chave e
+    os valores diferem. Com mais de uma, as sobras vão para `credit_only` /
+    `donation_only` — parear cruzado contaria crédito em dobro.
 - **Só linha válida conta.** Doação: `is_valid = NOT (status casa com
   INVALID_ORDER_STATUS_PATTERNS)` de `utils/import.js`. Crédito: `situacao`
   normalizada ∈ {`calculado`, `liberado`}.
@@ -454,10 +468,18 @@ caminho legado que só agrega por CPF.
 `processCreditImport`, `applyReimportCredit`, `deleteCreditImport`). Mesmo
 desenho do 8.3, terminando em `reconcileCredits()`.
 
-`reconcileCredits()` apaga `credit_reconciliation` e insere, **nesta ordem**:
-duplicadas de doação → duplicadas de crédito → `matched` → `divergent` →
-`credit_only` → `donation_only`. A ordem é a regra: cada passo só pega o que
-os anteriores não pegaram (`NOT EXISTS`).
+`reconcileCredits()` (`reconciliation/creditReconcileEngine.js`) apaga
+`credit_reconciliation` e insere, **nesta ordem**: duplicadas de doação →
+duplicadas de crédito → `matched` → `divergent` → `credit_only` →
+`donation_only`. A ordem é a regra: cada passo só pega o que os anteriores não
+pegaram (`NOT EXISTS`).
+
+O SQL dos passos mora em `reconciliation/creditReconcileSql.js` (módulo puro),
+e `tests/creditReconcile.test.js` confere o resultado **nota a nota** rodando
+exatamente essas instruções. Duas armadilhas que esse arquivo documenta: o
+"já foi classificada?" precisa ser dois `NOT EXISTS` com `AND` — um só com
+`OR` torna a conciliação quadrática (707 s contra 7 s no banco real) —, e o
+passo `divergent` precisa da restrição de nota única por lado.
 
 ### 8.5 Fechar o mês (Gestão Mensal)
 
@@ -592,6 +614,10 @@ Armadilhas conhecidas:
 
 O que **não** tem teste: a orquestração do cloud sync (debounce, upload,
 conflito, hidratação) e a importação de planilha de **créditos** por arquivo.
+
+Para medir com dados reais sem tocar na nuvem: baixar o `dados.json` do
+bucket e carregá-lo num servidor de dev em modo local. Imprima só agregados —
+as mensagens de erro guardadas em `action_history` contêm nomes de doadores.
 
 ---
 
