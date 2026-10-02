@@ -32,9 +32,13 @@ function assertShape(value, pattern, what) {
   return value;
 }
 
-/** Nome do arquivo virtual de uma tabela durante a restauração. */
-export function restoreFileNameFor(table) {
-  return `restore_${assertShape(table, IDENTIFIER_PATTERN, "nome de tabela")}.json`;
+/**
+ * Nome do arquivo virtual de uma tabela durante a restauração. `index`
+ * distingue os arquivos de uma tabela que chega em várias partes.
+ */
+export function restoreFileNameFor(table, index = 0) {
+  const suffix = Number.isInteger(index) && index > 0 ? `_${index}` : "";
+  return `restore_${assertShape(table, IDENTIFIER_PATTERN, "nome de tabela")}${suffix}.json`;
 }
 
 /**

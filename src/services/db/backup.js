@@ -287,6 +287,34 @@ export async function exportSnapshotText() {
 
   return { text, exportedAt, counts };
 }
+/**
+ * De qual tabela sai — e para qual volta — cada chave do snapshot, NA ORDEM
+ * em que as tabelas são carregadas (quem é referenciado vem antes).
+ */
+const RESTORE_TABLES_IN_ORDER = [
+  ["projects", "projects"],
+  ["demands", "demands"],
+  ["people", "people"],
+  ["donors", "donors"],
+  ["donor_cpf_links", "donorCpfLinks"],
+  ["donor_project_assignments", "donorProjectAssignments"],
+  ["imports", "imports"],
+  ["donation_notes", "donationNotes"],
+  ["import_cpf_summary", "importCpfSummary"],
+  ["monthly_donor_summary", "monthlyDonorSummary"],
+  ["notes", "notes"],
+  ["action_history", "actionHistory"],
+  ["donor_activity_history", "donorActivityHistory"],
+  ["abatement_adjustments", "abatementAdjustments"],
+  ["credit_imports", "creditImports"],
+  ["credit_notes", "creditNotes"],
+  ["trash_items", "trashItems"],
+];
+
+/**
+ * Restaura o banco a partir de um snapshot inteiro em memória — o arquivo de
+ * backup, ou o arquivo único antigo da nuvem.
+ */
 export async function restoreDatabaseSnapshot(
   snapshot,
   { allowEmpty = false, emitChange = true, onProgress } = {},
@@ -301,6 +329,95 @@ export async function restoreDatabaseSnapshot(
     return;
   }
 
+  // As colunas de cada tabela são decididas UMA vez: as permitidas que a
+  // primeira linha traz. Chave ausente nas demais linhas vira NULL, então um
+  // backup antigo, sem colunas mais novas, continua entrando.
+  const tablesToLoad = [];
+  for (const [tableName, key] of RESTORE_TABLES_IN_ORDER) {
+    const rows = normalizedSnapshot[key];
+    if (!rows || rows.length === 0) continue;
+
+    const allowedColumns = RESTORE_TABLE_COLUMNS[tableName] ?? [];
+    const columns = Object.keys(rows[0] ?? {}).filter((columnName) =>
+      allowedColumns.includes(columnName),
+    );
+    if (columns.length === 0) continue;
+
+    tablesToLoad.push({
+      tableName,
+      columns,
+      files: [
+        {
+          rowCount: rows.length,
+          // As linhas viajam para o worker como um texto só, e não valor a
+          // valor.
+          loadText: async () => JSON.stringify(rows),
+          loadRows: async () => rows,
+        },
+      ],
+    });
+  }
+
+  return restoreFromTableSources(tablesToLoad, { emitChange, onProgress });
+}
+
+/**
+ * Restaura o banco a partir das PARTES do snapshot da nuvem.
+ *
+ * `tables`: `[{ key, columns, files: [{ rowCount, loadText }] }]`, onde
+ * `loadText` devolve o JSON (um array) daquela parte. O texto vai direto
+ * para o leitor de JSON do DuckDB: não existe um momento em que o banco
+ * inteiro esteja num objeto ou num texto só — foi isso que fez o arquivo
+ * único bater no tamanho máximo de texto do navegador.
+ *
+ * `columns` são as colunas que quem gravou exportou. Só entram as que esta
+ * versão conhece; coluna que a parte não traz fica com o valor padrão da
+ * tabela.
+ */
+export async function restoreDatabaseFromParts(
+  tables,
+  { emitChange = true, onProgress } = {},
+) {
+  const byKey = new Map((tables ?? []).map((table) => [table.key, table]));
+  const tablesToLoad = [];
+
+  for (const [tableName, key] of RESTORE_TABLES_IN_ORDER) {
+    const table = byKey.get(key);
+    const files = (table?.files ?? []).filter((file) => Number(file.rowCount) > 0);
+    if (files.length === 0) continue;
+
+    const allowedColumns = RESTORE_TABLE_COLUMNS[tableName] ?? [];
+    const columns = Array.isArray(table.columns)
+      ? table.columns.filter((columnName) => allowedColumns.includes(columnName))
+      : allowedColumns;
+    if (columns.length === 0) continue;
+
+    tablesToLoad.push({
+      tableName,
+      columns,
+      files: files.map((file) => ({
+        rowCount: Number(file.rowCount),
+        loadText: file.loadText,
+        loadRows: async () => JSON.parse(await file.loadText()),
+      })),
+    });
+  }
+
+  return restoreFromTableSources(tablesToLoad, { emitChange, onProgress });
+}
+
+/**
+ * O que as duas restaurações têm em comum: limpar, carregar, refazer o que é
+ * derivado.
+ *
+ * `tablesToLoad`: `[{ tableName, columns, files }]`, com cada arquivo
+ * sabendo entregar o próprio conteúdo como texto (caminho rápido) ou como
+ * linhas (caminho de reserva).
+ */
+async function restoreFromTableSources(
+  tablesToLoad,
+  { emitChange = true, onProgress } = {},
+) {
   const tableOrderToClear = [
     // Reconciliation derived data first — references both donation_notes
     // and credit_notes, so wiping it before its sources avoids dangling
@@ -325,29 +442,10 @@ export async function restoreDatabaseSnapshot(
     "projects",
     "trash_items",
   ];
-  const tableEntriesToInsert = [
-    ["projects", normalizedSnapshot.projects],
-    ["demands", normalizedSnapshot.demands],
-    ["people", normalizedSnapshot.people],
-    ["donors", normalizedSnapshot.donors],
-    ["donor_cpf_links", normalizedSnapshot.donorCpfLinks],
-    ["donor_project_assignments", normalizedSnapshot.donorProjectAssignments],
-    ["imports", normalizedSnapshot.imports],
-    ["donation_notes", normalizedSnapshot.donationNotes],
-    ["import_cpf_summary", normalizedSnapshot.importCpfSummary],
-    ["monthly_donor_summary", normalizedSnapshot.monthlyDonorSummary],
-    ["notes", normalizedSnapshot.notes],
-    ["action_history", normalizedSnapshot.actionHistory],
-    ["donor_activity_history", normalizedSnapshot.donorActivityHistory],
-    ["abatement_adjustments", normalizedSnapshot.abatementAdjustments],
-    ["credit_imports", normalizedSnapshot.creditImports],
-    ["credit_notes", normalizedSnapshot.creditNotes],
-    ["trash_items", normalizedSnapshot.trashItems],
-  ];
-
   // Total de linhas, para o indicador "X de Y" da tela de carregamento.
-  const totalRowsToInsert = tableEntriesToInsert.reduce(
-    (sum, [, rows]) => sum + (rows?.length ?? 0),
+  const totalRowsToInsert = tablesToLoad.reduce(
+    (sum, table) =>
+      sum + table.files.reduce((count, file) => count + file.rowCount, 0),
     0,
   );
   let restoredRows = 0;
@@ -360,22 +458,6 @@ export async function restoreDatabaseSnapshot(
       totalRows: totalRowsToInsert,
     });
   };
-
-  // As colunas de cada tabela são decididas UMA vez: as permitidas que a
-  // primeira linha traz. Chave ausente nas demais linhas vira NULL, então um
-  // backup antigo, sem colunas mais novas, continua entrando.
-  const tablesToLoad = [];
-  for (const [tableName, rows] of tableEntriesToInsert) {
-    if (!rows || rows.length === 0) continue;
-
-    const allowedColumns = RESTORE_TABLE_COLUMNS[tableName] ?? [];
-    const columns = Object.keys(rows[0] ?? {}).filter((columnName) =>
-      allowedColumns.includes(columnName),
-    );
-    if (columns.length === 0) continue;
-
-    tablesToLoad.push({ tableName, rows, columns });
-  }
 
   // A reposição do estado de projeto (projeto padrão, demanda sem projeto,
   // doador sem vínculo) NÃO fica em nenhum dos dois caminhos abaixo: vive em
@@ -524,27 +606,34 @@ async function restoreTablesFromJson({
           await execute(`DELETE FROM ${tableName}`);
         }
 
-        for (const { tableName, rows, columns } of tablesToLoad) {
+        for (const { tableName, columns, files } of tablesToLoad) {
           onTableStart?.(tableName);
 
-          const fileName = restoreFileNameFor(tableName);
-          // As linhas viajam para o worker como um texto só, e não valor a
-          // valor. O conteúdo vem do arquivo de backup — a entrada menos
-          // confiável que chega ao banco —, e continua sem tocar em SQL: é
-          // DADO lido pelo `read_json`, nunca parte da instrução.
-          await registerFileText(fileName, JSON.stringify(rows));
-          registeredFiles.push(fileName);
+          for (const [index, file] of files.entries()) {
+            const fileName = restoreFileNameFor(tableName, index);
+            // O conteúdo vem do arquivo de backup ou da nuvem — a entrada
+            // menos confiável que chega ao banco —, e continua sem tocar em
+            // SQL: é DADO lido pelo `read_json`, nunca parte da instrução.
+            await registerFileText(fileName, await file.loadText());
+            registeredFiles.push(fileName);
 
-          await execute(
-            buildJsonRestoreInsertSql({
-              table: tableName,
-              columns,
-              columnTypes: columnTypesByTable.get(tableName) ?? new Map(),
-              fileName,
-            }),
-          );
+            await execute(
+              buildJsonRestoreInsertSql({
+                table: tableName,
+                columns,
+                columnTypes: columnTypesByTable.get(tableName) ?? new Map(),
+                fileName,
+              }),
+            );
 
-          onTableLoaded?.(tableName, rows.length);
+            // Solto assim que a parte entra: com dezenas de partes, segurar
+            // todas até o fim seria manter o banco inteiro duas vezes na
+            // memória do worker.
+            await releaseRegisteredFile(fileName);
+            registeredFiles.pop();
+
+            onTableLoaded?.(tableName, file.rowCount);
+          }
         }
 
         for (const { table, columns } of uniqueKeys) {
@@ -604,38 +693,42 @@ async function restoreTablesWithParameters({
         await execute(`DELETE FROM ${tableName}`);
       }
 
-      for (const { tableName, rows, columns } of tablesToLoad) {
+      for (const { tableName, columns, files } of tablesToLoad) {
         onTableStart?.(tableName);
 
-        for (
-          let chunkStart = 0;
-          chunkStart < rows.length;
-          chunkStart += BULK_INSERT_CHUNK_SIZE
-        ) {
-          const chunk = rows.slice(
-            chunkStart,
-            chunkStart + BULK_INSERT_CHUNK_SIZE,
-          );
-          // Os nomes de coluna são interpolados porque o DuckDB não aceita
-          // `?` em posição de identificador, mas já passaram pela lista de
-          // colunas permitidas. Os valores vão todos por parâmetro.
-          const rowPlaceholders = `(${columns.map(() => "?").join(", ")})`;
-          const valuesSql = chunk.map(() => rowPlaceholders).join(",\n");
-          const params = chunk.flatMap((row) =>
-            columns.map((columnName) => {
-              const value = row[columnName];
-              return value === undefined ? null : value;
-            }),
-          );
+        for (const file of files) {
+          const rows = await file.loadRows();
 
-          await executePrepared(
-            `
-            INSERT INTO ${tableName} (${columns.join(", ")})
-            VALUES ${valuesSql}
-          `,
-            params,
-          );
-          onChunkLoaded?.(tableName, chunk.length);
+          for (
+            let chunkStart = 0;
+            chunkStart < rows.length;
+            chunkStart += BULK_INSERT_CHUNK_SIZE
+          ) {
+            const chunk = rows.slice(
+              chunkStart,
+              chunkStart + BULK_INSERT_CHUNK_SIZE,
+            );
+            // Os nomes de coluna são interpolados porque o DuckDB não aceita
+            // `?` em posição de identificador, mas já passaram pela lista de
+            // colunas permitidas. Os valores vão todos por parâmetro.
+            const rowPlaceholders = `(${columns.map(() => "?").join(", ")})`;
+            const valuesSql = chunk.map(() => rowPlaceholders).join(",\n");
+            const params = chunk.flatMap((row) =>
+              columns.map((columnName) => {
+                const value = row[columnName];
+                return value === undefined ? null : value;
+              }),
+            );
+
+            await executePrepared(
+              `
+              INSERT INTO ${tableName} (${columns.join(", ")})
+              VALUES ${valuesSql}
+            `,
+              params,
+            );
+            onChunkLoaded?.(tableName, chunk.length);
+          }
         }
       }
     },
