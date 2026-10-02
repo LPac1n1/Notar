@@ -23,6 +23,7 @@ import {
   fitsKeepaliveBudget,
   hasRemoteVersionChanged,
   isObjectNotFoundError,
+  nextUploadRetryDelay,
   pickSnapshotVersion,
   shouldFlushOnHide,
 } from "./cloudSyncDecisions.js";
@@ -52,6 +53,10 @@ const FLUSH_DEBOUNCE_MS = 2000;
 
 let activeUserId = null;
 let pendingTimer = null;
+// Nova tentativa automática depois de um upload que falhou — ver
+// `scheduleUploadRetry`.
+let retryTimer = null;
+let consecutiveUploadFailures = 0;
 let pendingPromise = null;
 let isUploading = false;
 let lastSyncedAt = null;
@@ -111,7 +116,7 @@ function buildCloudStorageInfo(snapshot) {
         : "Sincronizado com a nuvem",
     description:
       snapshot.status === "error"
-        ? "A última gravação não foi salva no servidor. Tentaremos novamente na próxima alteração."
+        ? "A última gravação não foi salva no servidor. O sistema tenta de novo sozinho por alguns minutos e a cada nova alteração; você também pode usar \"Sincronizar agora\"."
         : "As alterações são salvas automaticamente no Supabase Storage.",
     lastSyncedAt: snapshot.lastSyncedAt,
     syncStatus: snapshot.status,
@@ -201,6 +206,8 @@ export function setActiveCloudUser(userId) {
   activeUserId = userId || null;
   if (!activeUserId) {
     cancelPendingTimer();
+    cancelRetryTimer();
+    consecutiveUploadFailures = 0;
     // Invalidate the hydration cache so a new account on the same tab
     // forces a fresh download instead of trusting whatever happens to be
     // sitting in DuckDB right now.
@@ -216,6 +223,28 @@ function cancelPendingTimer() {
     clearTimeout(pendingTimer);
     pendingTimer = null;
   }
+}
+
+function cancelRetryTimer() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+// Agenda a próxima tentativa depois de um upload que falhou. As esperas e o
+// limite vivem em `nextUploadRetryDelay`; esgotadas, nada é agendado e a
+// próxima tentativa só acontece por um gatilho de fora — nova alteração,
+// a aba indo para segundo plano, a rede voltando ou "Sincronizar agora".
+function scheduleUploadRetry() {
+  cancelRetryTimer();
+  const delay = nextUploadRetryDelay(consecutiveUploadFailures);
+  if (delay === null || !activeUserId) return;
+
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    uploadSnapshotImmediate(activeUserId);
+  }, delay);
 }
 
 export async function downloadSnapshotFromCloud(userId) {
@@ -316,6 +345,8 @@ async function performUpload(userId) {
       if (error) throw error;
       lastSyncedAt = new Date().toISOString();
       status = "idle";
+      consecutiveUploadFailures = 0;
+      cancelRetryTimer();
       // Refresh our anchor of the server-side version so we won't trip the
       // conflict detector on our own upload. Best-effort — if the metadata
       // fetch fails, we just leave the previous anchor and accept the
@@ -331,7 +362,14 @@ async function performUpload(userId) {
     } catch (uploadError) {
       status = "error";
       lastError = uploadError;
-      logError("cloudStorage.upload", uploadError);
+      consecutiveUploadFailures += 1;
+      // `logError` grava no histórico SEM agendar sincronização — é isso que
+      // impede esta falha de disparar o próximo upload por conta própria. A
+      // nova tentativa é a de baixo, com espera crescente e limite.
+      logError("cloudStorage.upload", uploadError, {
+        consecutiveFailures: consecutiveUploadFailures,
+      });
+      scheduleUploadRetry();
     } finally {
       isUploading = false;
       pendingPromise = null;
@@ -395,6 +433,7 @@ async function tryKeepaliveUpload(userId, blob) {
 async function flushBeforeUnload(userId) {
   if (!isSupabaseConfigured || !userId) return;
   cancelPendingTimer();
+  cancelRetryTimer();
   try {
     const snapshot = await exportSnapshotText();
     if (!snapshot) return;
@@ -415,6 +454,11 @@ export function scheduleCloudFlush() {
     return;
   }
   cancelPendingTimer();
+  // Uma alteração nova já vai tentar subir daqui a pouco; a nova tentativa
+  // que estava esperando perdeu o sentido. O contador de falhas NÃO zera
+  // aqui — só um upload bem-sucedido o zera —, senão cada alteração
+  // recomeçaria a série inteira de tentativas contra uma falha permanente.
+  cancelRetryTimer();
   pendingTimer = setTimeout(() => {
     pendingTimer = null;
     uploadSnapshotImmediate(activeUserId);
@@ -424,6 +468,7 @@ export function scheduleCloudFlush() {
 export async function flushPendingCloudSync() {
   if (!isSupabaseConfigured || !activeUserId) return;
   cancelPendingTimer();
+  cancelRetryTimer();
   if (isUploading && pendingPromise) {
     await pendingPromise;
   }
@@ -508,8 +553,19 @@ export function resetHydrationCache() {
 // each `execute`/`executePrepared`/`runInTransaction` once the depth is 0.
 setOnAfterTransaction(scheduleCloudFlush);
 
+// "Há trabalho que ainda não chegou à nuvem?"
+//
+// Além do envio agendado ou em andamento, conta a nova tentativa em espera e
+// o estado de erro em si. Sem o último, esgotadas as tentativas automáticas
+// a resposta voltava a ser "não" com uma alteração ainda por subir — e a aba
+// fechava sem aviso.
 export function hasPendingCloudWork() {
-  return Boolean(pendingTimer) || isUploading;
+  return (
+    Boolean(pendingTimer) ||
+    Boolean(retryTimer) ||
+    isUploading ||
+    status === "error"
+  );
 }
 
 // Flush while the page is still alive. `visibilitychange → hidden` and
@@ -555,9 +611,19 @@ if (typeof window !== "undefined") {
     event.preventDefault();
     event.returnValue = "";
 
-    if (pendingTimer && !isUploading) {
+    // Com conflito pendente NÃO se envia ao sair: `flushBeforeUnload` pula
+    // a checagem de conflito, e subir aqui sobrescreveria o que o outro
+    // dispositivo gravou sem o usuário ter escolhido. O aviso do navegador
+    // acima continua valendo — há trabalho que não subiu.
+    if (!isUploading && !remoteConflict) {
       flushBeforeUnload(activeUserId);
     }
+  });
+
+  // A rede voltou: é o melhor momento para tentar de novo, e não custa
+  // nada quando não há o que enviar.
+  window.addEventListener("online", () => {
+    flushIfPending("cloudStorage.flushOnOnline");
   });
 
   // When the tab regains focus, ask Supabase whether another device has

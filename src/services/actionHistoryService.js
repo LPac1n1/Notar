@@ -37,7 +37,7 @@ export async function createActionHistoryEntry({
   label = "",
   description = "",
   payload = {},
-}) {
+}, { scheduleSync = true } = {}) {
   if (!actionType || !entityType) {
     return "";
   }
@@ -68,7 +68,7 @@ export async function createActionHistoryEntry({
       description,
       JSON.stringify(payload ?? {}),
     ],
-    { source: "history", domains: ["history"] },
+    { source: "history", domains: ["history"], scheduleSync },
   );
 
   return id;

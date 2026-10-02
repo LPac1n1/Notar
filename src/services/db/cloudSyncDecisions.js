@@ -83,6 +83,28 @@ export function shouldFlushOnHide({
 }
 
 /**
+ * Esperas entre as novas tentativas automáticas de upload, na ordem.
+ *
+ * Crescentes e FINITAS. Crescentes porque a falha mais comum é passageira
+ * (rede) e resolve em segundos, mas a que não resolve — arquivo acima do
+ * limite do armazenamento, por exemplo — não melhora insistindo: cada
+ * tentativa exporta o banco inteiro e sobe dezenas de MB. Finitas porque,
+ * esgotadas, quem decide tentar de novo é o usuário (nova alteração, voltar
+ * à aba, "Sincronizar agora"), e não um laço.
+ */
+export const UPLOAD_RETRY_DELAYS_MS = [5_000, 15_000, 45_000, 120_000, 300_000];
+
+/**
+ * Quanto esperar antes da próxima tentativa, dado quantos uploads SEGUIDOS
+ * já falharam. `null` quando as tentativas automáticas se esgotaram.
+ */
+export function nextUploadRetryDelay(consecutiveFailures) {
+  const failures = Number(consecutiveFailures);
+  if (!Number.isInteger(failures) || failures < 1) return null;
+  return UPLOAD_RETRY_DELAYS_MS[failures - 1] ?? null;
+}
+
+/**
  * Extrai a versão (timestamp) do objeto de snapshot na listagem do bucket.
  * `updated_at` é o campo natural; objetos recém-criados podem vir só com
  * `created_at`.

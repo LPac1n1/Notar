@@ -56,14 +56,24 @@ export function logError(scope, error, context = {}) {
 
   Promise.resolve()
     .then(() =>
-      createActionHistoryEntry({
-        actionType: "error",
-        entityType: "log",
-        entityId: scope,
-        label: `Erro em ${scope}`,
-        description: message,
-        payload: buildPayload(scope, error, context),
-      }),
+      createActionHistoryEntry(
+        {
+          actionType: "error",
+          entityType: "log",
+          entityId: scope,
+          label: `Erro em ${scope}`,
+          description: message,
+          payload: buildPayload(scope, error, context),
+        },
+        // O registro de um erro NÃO agenda sincronização. Toda gravação
+        // comum agenda um upload do banco inteiro; se esta também agendasse,
+        // uma falha de upload registraria um erro, que agendaria outro
+        // upload, que falharia de novo — sem parar. Foi o que aconteceu
+        // quando o arquivo passou do limite do armazenamento: uma alteração
+        // virava uma tentativa a cada 2 s, cada uma exportando o banco todo.
+        // A linha sobe junto com a próxima alteração de verdade.
+        { scheduleSync: false },
+      ),
     )
     .catch(() => {
       // Swallow — by design, a logger must never fail noisily.

@@ -114,3 +114,37 @@ test("arquivo antigo: a conciliação gravada é ignorada e refeita ao abrir", a
   // Abrir não é gravar: nada pode ter subido.
   expect(storage.attempts).toHaveLength(0);
 });
+
+test("uma falha de upload não entra em laço, e a nova tentativa entrega", async ({
+  page,
+}) => {
+  // Como o armazenamento responde quando o arquivo passa do limite.
+  storage.rejectUploads(413);
+
+  await page.goto("/p/demandas-de-moradia");
+  await addDemand(page, "Demanda teimosa");
+
+  await expect
+    .poll(() => storage.attempts.length, { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  // UMA alteração, e depois ninguém mexe em nada por 12 s.
+  //
+  // Antes da correção o registro do erro contava como alteração e agendava
+  // outro upload: cabiam cinco ou seis tentativas nesse intervalo (uma a
+  // cada ~2 s), cada uma exportando o banco inteiro. Com espera crescente
+  // cabem duas — a original e a primeira nova tentativa, 5 s depois.
+  await page.waitForTimeout(12_000);
+  expect(storage.attempts.length).toBeLessThanOrEqual(3);
+  expect(storage.acceptedUploads).toBe(0);
+
+  // O armazenamento volta a aceitar: a alteração tem de chegar sozinha, sem
+  // o usuário precisar mexer em mais nada.
+  storage.acceptUploads();
+  await expect
+    .poll(() => storage.acceptedUploads, { timeout: 45_000 })
+    .toBeGreaterThan(0);
+  expect(
+    storage.readStoredSnapshot().data.demands.map((demand) => demand.name),
+  ).toContain("DEMANDA TEIMOSA");
+});

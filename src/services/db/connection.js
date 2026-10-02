@@ -240,11 +240,16 @@ function extractRowsAffected(result) {
  * Run a prepared write statement (INSERT/UPDATE/DELETE/etc.). Same lifetime
  * rules as `queryPrepared`. Honors the connection-level flush hook so the
  * connected file (if any) is persisted after the write.
+ *
+ * `scheduleSync: false` grava e avisa as telas, mas NÃO agenda o envio para
+ * a nuvem: a linha sobe junto com a próxima alteração de verdade. Existe para
+ * o registro de erros — ver `logError`. É diferente de `flush: false`, que
+ * também cala o aviso às telas.
  */
 export async function executePrepared(
   sql,
   params = [],
-  { domains, flush = true, source } = {},
+  { domains, flush = true, scheduleSync = true, source } = {},
 ) {
   const connection = await initDB();
   const stmt = await connection.prepare(sql);
@@ -267,7 +272,9 @@ export async function executePrepared(
   }
 
   if (flush && transactionDepth === 0 && rowsAffected !== 0) {
-    await flushAfterTransaction();
+    if (scheduleSync) {
+      await flushAfterTransaction();
+    }
     notifyDatabaseChanged(source || domains ? { source, domains } : undefined);
   }
 }

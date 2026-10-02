@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   KEEPALIVE_BODY_LIMIT_BYTES,
+  UPLOAD_RETRY_DELAYS_MS,
   fitsKeepaliveBudget,
   hasRemoteVersionChanged,
   isObjectNotFoundError,
+  nextUploadRetryDelay,
   pickSnapshotVersion,
   shouldFlushOnHide,
 } from "../src/services/db/cloudSyncDecisions.js";
@@ -118,4 +120,33 @@ test("snapshot version prefers updated_at and tolerates a fresh object", () => {
     pickSnapshotVersion([{ name: "outro.json" }], "dados.json"),
     null,
   );
+});
+
+// Uma falha de upload já entrou em laço uma vez: o registro do erro agendava
+// outro upload, que falhava de novo, a cada 2 s, exportando o banco inteiro.
+// As tentativas automáticas precisam ESPAÇAR e precisam ACABAR.
+test("as novas tentativas de upload espaçam cada vez mais", () => {
+  const delays = [1, 2, 3, 4, 5].map((failures) => nextUploadRetryDelay(failures));
+
+  assert.deepEqual(delays, UPLOAD_RETRY_DELAYS_MS);
+  for (let index = 1; index < delays.length; index += 1) {
+    assert.ok(
+      delays[index] > delays[index - 1],
+      "cada espera tem de ser maior que a anterior",
+    );
+  }
+  // A primeira não pode ser curta a ponto de reproduzir o laço de 2 s.
+  assert.ok(delays[0] >= 5_000);
+});
+
+test("as novas tentativas de upload acabam", () => {
+  assert.equal(nextUploadRetryDelay(UPLOAD_RETRY_DELAYS_MS.length + 1), null);
+  assert.equal(nextUploadRetryDelay(50), null);
+});
+
+test("sem falha registrada não há o que tentar de novo", () => {
+  assert.equal(nextUploadRetryDelay(0), null);
+  assert.equal(nextUploadRetryDelay(-1), null);
+  assert.equal(nextUploadRetryDelay(undefined), null);
+  assert.equal(nextUploadRetryDelay(1.5), null);
 });
