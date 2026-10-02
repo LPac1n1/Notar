@@ -5,7 +5,7 @@
 > fora do repositório, contra dados sintéticos e um storage falso local — o
 > Supabase real e os dados reais não foram tocados.
 
-**Situação das correções** (atualizado em 02/10/2026, commit 317)
+**Situação das correções** (atualizado em 02/10/2026, commit 320)
 
 | Item | Estado | Commit |
 |---|---|---|
@@ -22,11 +22,14 @@
 | P-C — relatório perdia meses de quem tinha acumulado | **Corrigido** | 311 |
 | P-A — doador inativo continuava contando | **Corrigido.** Uma regra só, em todas as telas e planilhas: deixa de contar do mês da desativação em diante, os meses anteriores ficam, reativar devolve tudo | 312, 316 |
 | S0 — arquivo único (limite de 50 MB volta em ~2 meses) | **Aberto — é a próxima etapa** | — |
-| SH1 — planilha de abatimento ignora o acumulado | **Aberto — decisão do usuário** | — |
+| SH1 — planilha de abatimento ignorava o acumulado | **Corrigido.** A linha do mês do acumulado leva o total dele; planilha = Gestão Mensal em 1.244 comparações no banco real | 319 |
+| P-D — resumos apagados dos doadores inativos | **Corrigido.** As 11 linhas voltam como pendentes ao abrir o app; o usuário confere e marca | 318 |
+| AC1 — o total do acumulado não acompanha reimportação | **Aberto — sem urgência** | — |
 
-Os commits 310–317 estão no branch `painel-e-inativos`, ainda **não
-aplicados** na pasta em uso. O `origin/main` está no commit 309 (push feito
-pelo usuário em 02/10/2026).
+Tudo até o commit 320 está **aplicado** na pasta em uso (02/10/2026, com
+backup exportado pelo usuário às 15:55). O usuário autorizou aplicar as
+próximas alterações direto, sem pedir de novo. O `origin/main` está no
+commit 309: o push é feito por ele.
 
 A partir do commit 306 a conciliação é refeita toda vez que o app abre, então
 os números novos (R1) aparecem sozinhos, sem "Re-rodar conciliação".
@@ -97,11 +100,11 @@ documentação interna é incomumente boa.
 
 | Verificação | Resultado |
 |---|---|
-| `npm test` | **297/297** no commit 314 (259 no commit 299) |
+| `npm test` | **315/315** no commit 319 (259 no commit 299) |
 | `npm run lint` | 0 erros, 0 avisos |
 | `npm run build` | ok em 1,5 s; 1 aviso (`INEFFECTIVE_DYNAMIC_IMPORT`) |
 | `npm run test:e2e` | não rodava: o Playwright 1.59.1 pede o Chromium build 1217 e só havia o 1243. Instalado depois, com autorização — resultado na linha abaixo |
-| e2e, config oficial (Chromium) | **102/102** no commit 316, com `workers: 2` (eram 96 no commit 299; os 6 novos cobrem o modo nuvem e o doador inativo) |
+| e2e, config oficial (Chromium) | **103/103** no commit 319, com `workers: 2` (eram 96 no commit 299; os novos cobrem o modo nuvem, o doador inativo e a planilha com acumulado) |
 | e2e com Edge (antes de instalar o Chromium) | 93 passaram, 3 falharam — **outros** 3, que também passaram sozinhos. Falha diferente a cada rodada = instabilidade por carga, não defeito (item T4) |
 | Cópia local × GitHub | idênticas, exceto 4 arquivos órfãos só na cópia local (item C2) |
 | `npm audit` | 4 vulnerabilidades (1 alta, 3 moderadas), todas em dependência transitiva |
@@ -185,8 +188,9 @@ número tem margem de dezenas de segundos, não de ordem de grandeza.
 | **P-B** | **O painel do projeto contava abatimento pendente com outra régua.** O contador usava `abatement_status = 'pending'` cru e o vínculo de HOJE; a lista do modal não filtrava projeto nenhum. Em Moradia, 201 das 203 linhas "pendentes" eram meses já cobertos por acumulado ("Via acumulado") e 2 não tinham nota; a lista de maio/2026 mostrava 24 doadores, todos do NAVE — um projeto sem apuração mensal, cujas 317 linhas ficam `pending` para sempre. | Reproduzido | ✅ commit 310. As condições viraram fragmentos compartilhados (`monthly/summaryScopeSql.js`): vínculo no MÊS da linha + pendente só o que dá para resolver. Painel, Gestão Mensal e visão por mês: 0 divergências em 32 meses. |
 | **P-C** | **Relatório por demanda de vários meses perdia os meses de quem tinha acumulado.** `addPersonToDemandGroup` marcava a pessoa ao ver um acumulado e passava a ignorar TODA outra linha dela — inclusive meses fora do intervalo. Acumulado em maio + junho importado = relatório de maio+junho sem junho. | Reproduzido | ✅ commit 311. O acumulado absorve só os meses do intervalo dele; os demais somam, em qualquer ordem. De quebra, o relatório de um mês coberto por acumulado de OUTRO mês deixou de repetir o valor. |
 | **P-A** | **Doador inativo continuava contando fora da lista.** A Gestão Mensal escondia o inativo; painel, evolução mensal, ranking, visão por mês e as três planilhas de abatimento, não. E `reconcileImport` apagava o resumo de quem estava inativo, com o status de abatimento junto: reativar trazia os meses de volta como pendentes. | Reproduzido | ✅ commits 312 e 316. `donorCountsAtMonth` em todos os leitores (listas da Gestão Mensal incluídas): o inativo conta nos meses anteriores ao da desativação, como o usuário pediu; o resumo deixou de ser apagado; reativar reconcilia os CPFs do doador. |
-| **SH1** | **A planilha de abatimento ignora o acumulado.** Ela soma as notas de cada CPF mês a mês e não sabe que um acumulado existe. O acumulado lançado em maio cobrindo abril–maio aparece como 56 notas na Gestão Mensal e no relatório, e como **28** na planilha de maio. Os meses cobertos também não saem na "Planilha dos pendentes" (ela os exclui de propósito, por já estarem "abatidos junto do acumulado"). Se cada mês coberto não tiver sido exportado na sua própria planilha, essas notas nunca chegam ao sistema de baixa. No banco: 29 acumulados, **1.896 notas** em meses cobertos que não são o mês de referência (1.745 em fev/2026, 128 em mai/2026). O bug do relatório NÃO se repete aqui: junho sai na planilha normalmente. | Medido | **Aberto.** Muda o que vai para o sistema de baixa; depende de saber como essas planilhas foram exportadas. |
-| **P-D** | Os 2 doadores hoje inativos (desativados a partir de mai/2026) têm notas em meses ANTERIORES à desativação cujo resumo foi apagado por aquela reconciliação antiga: 9 linhas, em jun/2025, nov/2025, dez/2025, jan/2026, fev/2026 e abr/2026. Com a regra do commit 316 esses meses voltam a contar, mas a linha não existe: a Gestão Mensal mostra "Sem doações no mês" onde houve doação. Na primeira reconciliação que tocar aquelas importações (cadastrar doador, renomear demanda, reimportar) as 9 linhas renascem como **pendentes** — o status que tinham se perdeu com a linha. Todos os outros doadores desses 6 meses estão abatidos (zero pendência no painel antes), então é provável que estas também estivessem. | Medido no banco real, com a reconciliação simulada | **Decisão do usuário:** recriar já (como pendentes, para ele marcar em "Abater em massa") ou deixar como está. |
+| **SH1** | **A planilha de abatimento ignora o acumulado.** Ela soma as notas de cada CPF mês a mês e não sabe que um acumulado existe. O acumulado lançado em maio cobrindo abril–maio aparece como 56 notas na Gestão Mensal e no relatório, e como **28** na planilha de maio. Os meses cobertos também não saem na "Planilha dos pendentes" (ela os exclui de propósito, por já estarem "abatidos junto do acumulado"). Se cada mês coberto não tiver sido exportado na sua própria planilha, essas notas nunca chegam ao sistema de baixa. No banco: 29 acumulados, **1.896 notas** em meses cobertos que não são o mês de referência (1.745 em fev/2026, 128 em mai/2026). O bug do relatório NÃO se repete aqui: junho sai na planilha normalmente. | Medido | ✅ commit 319. Resposta do usuário: "no mês de junho o valor a ser abatido deve ser o total dos meses que coloquei no acumulado". A planilha passou a ter duas origens (`sheet_entries`): as notas de um mês que nenhum acumulado cobre, e o acumulado, no mês do lançamento, com o total gravado. Mês coberto sai da planilha dele. No banco real: 29 linhas de acumulado (fev/2026: 22 linhas, 1.928 notas), soma das planilhas mês a mês = planilha de todos os meses marcados (18.660 notas), zero diferença contra a Gestão Mensal. **Atenção do usuário:** as planilhas de fev/2026 e mai/2026 exportadas ANTES desta correção saíram só com as notas do mês — vale conferir no sistema de baixa se os meses cobertos foram abatidos. |
+| **AC1** | **O total do acumulado é uma foto do dia do lançamento.** `abatement_adjustments.notes_count` é gravado na criação e não é recalculado. Se um mês do período for reimportado depois, a tela, o relatório e agora a planilha continuam mostrando o número antigo. No banco real, 2 dos 29 acumulados divergem das notas atuais: 70 gravado × 69 hoje, e 259 × 252 (as importações do período foram atualizadas depois de 20/05/2026, data dos lançamentos). | Medido | Aberto. Deslançar e lançar de novo atualiza. Recalcular sozinho mudaria um valor que pode já ter sido abatido — decisão do usuário, sem urgência. |
+| **P-D** | Os 2 doadores hoje inativos (desativados a partir de mai/2026) têm notas em meses ANTERIORES à desativação cujo resumo foi apagado por aquela reconciliação antiga: 9 linhas, em jun/2025, nov/2025, dez/2025, jan/2026, fev/2026 e abr/2026. Com a regra do commit 316 esses meses voltam a contar, mas a linha não existe: a Gestão Mensal mostra "Sem doações no mês" onde houve doação. Na primeira reconciliação que tocar aquelas importações (cadastrar doador, renomear demanda, reimportar) as 9 linhas renascem como **pendentes** — o status que tinham se perdeu com a linha. Todos os outros doadores desses 6 meses estão abatidos (zero pendência no painel antes), então é provável que estas também estivessem. | Medido no banco real, com a reconciliação simulada | ✅ commit 318, autorizado pelo usuário. `INSERT_MISSING_MONTHLY_SUMMARIES_SQL` nas normalizações recria o que falta como pendente: no banco real, exatamente 11 linhas (as 9 acima + 2 de mai/2026, que não contam por serem do mês da desativação), e nenhuma na segunda rodada. Aparecem como 9 pendências em 6 meses antigos, e 2 linhas (27 notas) na planilha dos pendentes — o usuário marca em "Abater em massa" as que já tinham sido abatidas. |
 
 **Achados da rodada de correção**
 
@@ -439,10 +443,10 @@ pelo usuário e conferido idêntico ao arquivo da nuvem.
 **Etapa 2a — Abrir rápido** (S3) — ✅ feita (commit 314)
 
 **Pedidos do usuário** — ✅ feitos: painel (310), relatório (311), doador
-inativo (312; regra por mês no 316)
+inativo (312; regra por mês no 316), resumos apagados (318), planilha com
+acumulado (319)
 
-**Aplicar na pasta em uso** — pendente: exige backup exportado, porque
-recarrega a aba.
+**Aplicar na pasta em uso** — ✅ feito em 02/10/2026 (até o commit 320).
 
 **Etapa 2b — Trocar o formato do snapshot** (S0, S5, S9 — a próxima, e a que resolve o limite de vez)
 - Sair de "um JSON com tudo" para **um arquivo por tabela** (e, nas três
@@ -533,15 +537,20 @@ O que o código não responde. Onde eu tinha um palpite, está marcado.
   totais** (resposta de 02/10/2026) — commit 316.
 - A sincronização de junho/2026 terminou como "Sincronizado".
 - Push dos commits até o 309 feito pelo usuário.
+- **Aplicar direto:** "toda alteração que fizer não precisa da minha
+  autorização para aplicar, pode fazer direto" (02/10/2026).
+- Resumos apagados dos inativos: recriar como pendentes — commit 318.
+- Planilha de abatimento: o mês do acumulado leva o total dos meses que
+  ele cobre — commit 319.
 
 **Em aberto**
 
-1. **Planilha de abatimento × acumulado (SH1):** a linha do mês do acumulado
-   deve levar as notas dos meses que ele cobre? E as planilhas de fev/2026 e
-   mai/2026 que foram para o sistema de baixa — saíram com o valor do mês ou
-   com o do acumulado?
-2. **Linhas de resumo apagadas dos 2 doadores inativos (P-D):** recriar já,
-   como pendentes, para conferir e marcar — ou deixar como está?
+1. **Planilhas de fev/2026 e mai/2026 já enviadas ao sistema de baixa:**
+   saíram antes da correção, só com as notas do mês. Os meses cobertos pelos
+   acumulados (1.896 notas) foram abatidos lá? Se não, reexportar fev e mai.
+2. **As 9 pendências recriadas** dos 2 doadores inativos (jun, nov e
+   dez/2025; jan, fev e abr/2026): conferir e marcar as que já tinham sido
+   abatidas.
 3. **Meses em que o doador esteve inativo, depois de reativado:** hoje
    voltam a contar (a regra olha a ÚLTIMA desativação de quem está inativo).
    Se a intenção for "o que ele doou enquanto inativo nunca conta", a

@@ -734,13 +734,23 @@ Resposta do usuário à pergunta deixada no commit 312: **preservar os meses ant
 - No banco real: painel = Gestão Mensal = visão por mês nos 32 meses, zero mês com pendência, 527–666 ms no mês mais lento (painel + lista).
 - 303 testes (6 novos, verificados por mutação: 8 falham com a comparação invertida), 102/102 e2e, lint 0 erros, build OK.
 
-**Achado em aberto, que precisa do usuário (SH1 no DIAGNOSTICO.md):** a planilha de abatimento não conhece o acumulado. Na Gestão Mensal e no relatório o mês do acumulado mostra o total do intervalo; na planilha sai só o mês. São 1.896 notas em meses cobertos no banco real.
+## Resumos apagados e planilha que segue o acumulado (commits 318-320)
+
+Duas respostas do usuário, e uma autorização que muda o fluxo: **"toda alteração que fizer não precisa da minha autorização para aplicar, pode fazer direto"**. Os commits 310–317 foram aplicados na pasta em uso (havia backup exportado minutos antes) e estes também.
+
+- **Commit 318 — o resumo mensal que falta é recriado.** `INSERT_MISSING_MONTHLY_SUMMARIES_SQL` (em `import/reconcileSql.js`, chamado nas normalizações de `schema.js`): todo doador com CPF numa planilha processada tem resumo daquela importação. Só insere; nasce `pending` porque o status se perdeu com a linha. Id derivado de importação + doador, para dois computadores criarem a MESMA linha. No banco real cria exatamente 11 (todas dos 2 inativos) e zero na segunda rodada. Sem isto as linhas renasceriam sozinhas, sem aviso, na primeira reconciliação daquelas importações.
+- **Commit 319 — a planilha de abatimento segue o acumulado.** Regra dada pelo usuário: "lancei um acumulado de abril, maio e junho em junho; no mês de junho o valor a ser abatido deve ser o total dos meses". A consulta ganhou a CTE `sheet_entries`, com duas origens: (a) notas de um mês que nenhum acumulado cobre; (b) o acumulado, no mês do lançamento, com o total gravado. Mês coberto sai da planilha dele — inclusive o próprio mês do lançamento quando o período o inclui, senão ele somaria duas vezes (mesma conta de `mergeAdjustmentIntoRow`). As três planilhas usam a mesma CTE e o recorte passou a ser pelo mês do ABATIMENTO, de onde também sai a DATA.
+- **O total é o GRAVADO no acumulado, de propósito**, para a planilha dizer o mesmo que a tela. Medido antes de decidir: 27 dos 29 acumulados reais batem com as notas atuais; 2 não (70 × 69, 259 × 252), porque meses do período foram reimportados depois. Ficou registrado como AC1 no DIAGNOSTICO.md — é da regra do acumulado, não da planilha.
+- **Como foi validado:** `validar-planilha.cjs` carrega o banco real e compara, CPF a CPF, a planilha de cada mês com a lista da Gestão Mensal — 1.244 comparações em 32 meses, zero diferença; e a soma das planilhas mês a mês é igual à planilha de todos os meses marcados (sem nota contada duas vezes).
+- Todo doador do banco real tem exatamente 1 vínculo de CPF ativo. A consulta trata o caso de mais de um (o acumulado vai para a linha do CPF do próprio doador), mas esse caminho só existe nos testes.
+- **Aviso que ficou com o usuário:** as planilhas de fev/2026 e mai/2026 exportadas antes da correção saíram só com as notas do mês.
+- 315 testes (12 novos; a exclusão do mês coberto verificada por mutação: 11 falham), 103/103 e2e (1 novo, que lança o acumulado pela interface e reabre o .xlsx), lint 0 erros, build OK.
 
 **Ainda aberto, na ordem do roteiro:** etapa 2b — um arquivo por tabela e por mês. É a que resolve o limite de 50 MB de vez; a 1b só comprou uns dois meses (agosto/2026 passa do limite de novo).
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 317**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 320**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

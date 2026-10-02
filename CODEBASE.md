@@ -381,8 +381,16 @@ que é preciso para restaurar), `schema_version`.
   não pode ser marcado sozinho (`markSubsumedRows`, `filterOutSubsumedIds`).
   O acumulado absorve SÓ os meses do intervalo dele; os outros meses do
   doador são doações à parte e somam normalmente (o relatório por demanda já
-  errou isso). **A planilha de abatimento não conhece o acumulado** — soma as
-  notas mês a mês; ver DIAGNOSTICO SH1.
+  errou isso). **A planilha de abatimento segue o acumulado**: a linha do
+  mês em que ele foi lançado sai com o total GRAVADO nele (o número que a
+  tela mostra), e os meses cobertos não saem nas planilhas deles. Tudo na
+  CTE `sheet_entries` de `monthly/abatementSheetSql.js`, compartilhada pelas
+  três planilhas. O total do acumulado é uma foto do dia do lançamento: não
+  se atualiza se um mês do período for reimportado (DIAGNOSTICO AC1).
+- **Todo doador com CPF numa planilha processada tem resumo mensal dela.**
+  `INSERT_MISSING_MONTHLY_SUMMARIES_SQL` (`import/reconcileSql.js`) recria,
+  como pendente, o resumo que faltar; roda nas normalizações, a cada
+  abertura. Só insere — linha existente não é tocada.
 - **"Conta para a apuração do projeto"** é uma definição só, em
   `services/monthly/summaryScopeSql.js`, e toda tela que soma ou conta
   `monthly_donor_summary` passa por ela:
