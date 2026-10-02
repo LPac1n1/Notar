@@ -5,6 +5,7 @@ import {
   runInTransaction,
 } from "../db";
 import { createActionHistoryEntry } from "../actionHistoryService";
+import { reconcileImportsForCpfs } from "../importService";
 
 /**
  * Activity tracking for the donors domain — all the activate/deactivate
@@ -12,7 +13,26 @@ import { createActionHistoryEntry } from "../actionHistoryService";
  * `donors.is_active`. Kept separate from CRUD writes (donorWriter.js) and
  * pure reads (donorProfile.js) so the domain rules around chronology stay
  * isolated and unit-testable.
+ *
+ * Desativar NÃO apaga nada: tira o doador da apuração, e isso é decidido na
+ * leitura (`summaryDonorIsActive`). O resumo mensal dele — com o status de
+ * abatimento de cada mês — fica guardado, e é por isso que reativar o traz de
+ * volta exatamente como estava.
  */
+
+async function listDonorCpfs(donorId) {
+  const rows = await queryPrepared(
+    `
+    SELECT cpf
+    FROM donor_cpf_links
+    WHERE donor_id = ?
+      AND is_active = TRUE
+  `,
+    [donorId],
+  );
+
+  return rows.map((row) => row.cpf).filter(Boolean);
+}
 
 function normalizeMonthValue(value) {
   if (!value) {
@@ -180,6 +200,14 @@ export async function reactivateDonor(donorId, referenceMonth) {
     description: `Doador ${donor.name} reativado a partir de ${formatMonthLabel(normalizedMonth)}.`,
     payload: { referenceMonth: normalizedMonth.slice(0, 7) },
   });
+
+  // Refaz o resumo das importações em que os CPFs do doador aparecem. Hoje o
+  // resumo de um doador inativo é preservado, mas nem sempre foi: até esta
+  // regra existir, reconciliar uma importação apagava as linhas de quem
+  // estava inativo. Sem isto, um doador desativado naquela época voltaria a
+  // ser ativo sem os meses que tinham sumido. As linhas que já existem
+  // mantêm o status; as recriadas nascem pendentes.
+  await reconcileImportsForCpfs(await listDonorCpfs(donorId));
 }
 
 export async function getDonorActivityConstraints(donorId) {

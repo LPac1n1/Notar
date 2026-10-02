@@ -12,6 +12,7 @@ import {
   donorBelongedToProjectAtMonth,
   MATCHED_CREDIT_BY_DONOR_MONTH,
 } from "../project/projectAssignmentSql.js";
+import { summaryDonorIsActive } from "../monthly/summaryScopeSql.js";
 
 export const MONTHLY_TREND_LIMIT = 12;
 
@@ -66,6 +67,7 @@ export function buildMonthlyTrendSql(projectId) {
       count(DISTINCT monthly_donor_summary.donor_id) AS donor_count
     FROM monthly_donor_summary
     WHERE ${summaryScope}
+      AND ${summaryDonorIsActive()}
     GROUP BY strftime(monthly_donor_summary.reference_month, '%Y-%m-01')
   ),
   all_months AS (

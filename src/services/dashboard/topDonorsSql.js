@@ -1,5 +1,6 @@
 import { startOfMonth } from "../../utils/date.js";
 import { donorBelongsToProject } from "../project/projectAssignmentSql.js";
+import { summaryDonorIsActive } from "../monthly/summaryScopeSql.js";
 
 /**
  * Builder do ranking de maiores doadores.
@@ -38,6 +39,8 @@ export function buildTopDonorsQuery({
   const conditions = projectId
     ? [donorBelongsToProject("monthly_donor_summary.donor_id", projectId)]
     : [];
+  // Doador inativo não entra na apuração, então não entra no ranking dela.
+  conditions.push(summaryDonorIsActive());
   const params = [];
 
   if (referenceMonth) {

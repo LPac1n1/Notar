@@ -39,6 +39,20 @@ import {
  * precisam criar o vínculo explicitamente.
  */
 async function seedAssignments(conn, donorIds) {
+  // Garante que o doador EXISTE. Várias fixtures inserem só o resumo mensal,
+  // e as consultas de apuração passaram a exigir doador ativo
+  // (`summaryDonorIsActive`): resumo de quem não está no cadastro não conta.
+  // No sistema real essa linha não existe — excluir o doador leva o resumo
+  // junto —, então a fixture precisa refletir isso. Quem já inseriu o próprio
+  // doador não é tocado.
+  for (const donorId of donorIds) {
+    await conn.query(`
+      INSERT INTO donors (id, name, donor_type, is_active, created_at, updated_at)
+      SELECT '${donorId}', '${donorId}', 'holder', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      WHERE NOT EXISTS (SELECT 1 FROM donors WHERE id = '${donorId}')
+    `);
+  }
+
   const values = donorIds
     .map(
       (donorId, index) =>
@@ -2455,6 +2469,12 @@ test("listMonthlyTrend returns the most recent months, newest window first", asy
       VALUES ('t-extra', 'imp-x', 'donor-9', DATE '2026-02-01', '99999999999',
               'Outro', 'Remedios', 7, 1.00, 7.00, 'pending',
               CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+
+    // O doador precisa existir e estar ativo para contar na apuração.
+    await conn.query(`
+      INSERT INTO donors (id, name, donor_type, is_active, created_at, updated_at)
+      VALUES ('donor-9', 'Outro', 'holder', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `);
 
     await conn.query(`

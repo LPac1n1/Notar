@@ -1,7 +1,9 @@
 import { donorBelongsToProject } from "../project/projectAssignmentSql.js";
 import {
   cpfSummaryBelongsToProject,
+  cpfSummaryDonorIsActive,
   summaryBelongsToProject,
+  summaryDonorIsActive,
   summaryIsActionable,
 } from "../monthly/summaryScopeSql.js";
 
@@ -17,6 +19,7 @@ import {
  * `monthly/summaryScopeSql.js`:
  *
  *   • só linhas de doadores que pertenciam a ESTE projeto naquele mês;
+ *   • só doadores ATIVOS — desativar tira o doador da apuração;
  *   • "pendente" só o que dá para resolver (com nota, não coberto por
  *     acumulado de outro mês).
  *
@@ -26,6 +29,18 @@ import {
  * cobertos por acumulado, e a lista de maio mostrava só doadores de outro.
  */
 
+// "Conta para a apuração deste projeto": pertencia a ele no mês e o doador
+// está ativo. Os dois juntos, para nenhuma consulta lembrar de um só.
+function countedSummary(projectId) {
+  return `${summaryBelongsToProject(projectId)}
+          AND ${summaryDonorIsActive()}`;
+}
+
+function countedCpfSummary(projectId) {
+  return `${cpfSummaryBelongsToProject(projectId)}
+          AND ${cpfSummaryDonorIsActive()}`;
+}
+
 /** Limite da lista de pendentes. O contador é exato; a lista é para agir. */
 export const MONTH_BLOCK_PENDING_LIMIT = 500;
 
@@ -33,8 +48,8 @@ export const MONTH_BLOCK_PENDING_LIMIT = 500;
  * Totais do mês de uma importação. Parâmetro: o id da importação.
  */
 export function buildMonthBlockSummarySql(projectId) {
-  const summaryScope = summaryBelongsToProject(projectId);
-  const cpfScope = cpfSummaryBelongsToProject(projectId);
+  const summaryScope = countedSummary(projectId);
+  const cpfScope = countedCpfSummary(projectId);
 
   return `
     SELECT
@@ -108,7 +123,7 @@ export function buildMonthBlockDemandsSql(projectId) {
       ) AS applied_count
     FROM monthly_donor_summary
     WHERE monthly_donor_summary.import_id = ?
-      AND ${summaryBelongsToProject(projectId)}
+      AND ${countedSummary(projectId)}
     GROUP BY 1
     ORDER BY total_abatement DESC, total_notes DESC, demand ASC
   `;
@@ -134,7 +149,7 @@ export function buildMonthBlockPendingListSql(projectId) {
     WHERE monthly_donor_summary.import_id = ?
       AND monthly_donor_summary.abatement_status = 'pending'
       AND ${summaryIsActionable()}
-      AND ${summaryBelongsToProject(projectId)}
+      AND ${countedSummary(projectId)}
     ORDER BY
       monthly_donor_summary.abatement_amount DESC,
       monthly_donor_summary.donor_name ASC
@@ -150,7 +165,7 @@ export function buildMonthBlockPendingListSql(projectId) {
  * consulta devolve zeros.
  */
 export function buildMonthBlockComparisonSql(projectId) {
-  const summaryScope = summaryBelongsToProject(projectId);
+  const summaryScope = countedSummary(projectId);
 
   return `
     SELECT
@@ -158,7 +173,7 @@ export function buildMonthBlockComparisonSql(projectId) {
         SELECT sum(import_cpf_summary.notes_count)
         FROM import_cpf_summary
         WHERE import_cpf_summary.import_id = ?
-          AND ${cpfSummaryBelongsToProject(projectId)}
+          AND ${countedCpfSummary(projectId)}
       ), 0) AS previous_notes,
       coalesce((
         SELECT sum(monthly_donor_summary.abatement_amount)

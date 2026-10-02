@@ -64,6 +64,44 @@ export function summaryIsActionable(alias = "monthly_donor_summary") {
 }
 
 /**
+ * O doador da linha está ATIVO.
+ *
+ * Desativar um doador tira as doações dele da apuração — listas, totais,
+ * painel, planilha de abatimento — e reativar traz tudo de volta. Por isso o
+ * critério é só de LEITURA: nenhuma linha é apagada quando o doador é
+ * desativado (`reconcileImport` continua gerando o resumo dele), e o status
+ * de abatimento de cada mês fica guardado para quando ele voltar.
+ *
+ * É a mesma regra que a lista da Gestão Mensal sempre usou
+ * (`donors.is_active = TRUE`). O que faltava era as outras telas a seguirem:
+ * o doador sumia da lista e continuava no painel, na visão por mês e na
+ * planilha que vai para o sistema de baixa.
+ *
+ * Se um dia a regra virar "não conta a partir do mês da desativação", é
+ * aqui — e em `cpfSummaryDonorIsActive` — que ela muda.
+ */
+export function summaryDonorIsActive(alias = "monthly_donor_summary") {
+  return `EXISTS (
+    SELECT 1
+    FROM donors AS counted_donor
+    WHERE counted_donor.id = ${alias}.donor_id
+      AND counted_donor.is_active = TRUE
+  )`;
+}
+
+/** O mesmo, para linhas de `import_cpf_summary`: o doador dono do CPF. */
+export function cpfSummaryDonorIsActive(alias = "import_cpf_summary") {
+  return `EXISTS (
+    SELECT 1
+    FROM donor_cpf_links AS counted_cpf_link
+    INNER JOIN donors AS counted_cpf_donor
+      ON counted_cpf_donor.id = counted_cpf_link.donor_id
+    WHERE counted_cpf_link.id = ${alias}.matched_source_id
+      AND counted_cpf_donor.is_active = TRUE
+  )`;
+}
+
+/**
  * Mesma ideia de `summaryBelongsToProject`, para linhas de
  * `import_cpf_summary`: o CPF casou com um doador que pertencia ao projeto
  * no mês da planilha.

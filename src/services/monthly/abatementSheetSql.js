@@ -57,8 +57,11 @@ const SHEET_FROM = `
   INNER JOIN donor_cpf_links
     ON donor_cpf_links.id = import_cpf_summary.matched_source_id
     AND donor_cpf_links.is_active = TRUE
+  -- Doador inativo não vai para o sistema de baixa: a planilha é a lista de
+  -- quem tem abatimento a receber, e desativar tira o doador da apuração.
   INNER JOIN donors
     ON donors.id = donor_cpf_links.donor_id
+    AND donors.is_active = TRUE
   -- LEFT: só o auxiliar tem holder_person_id. Para o titular o join não casa,
   -- e o coalesce acima faz a linha usar a identidade dele mesmo.
   LEFT JOIN people AS holder_people

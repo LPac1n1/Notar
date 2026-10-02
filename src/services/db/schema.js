@@ -442,7 +442,6 @@ async function applyDataNormalizations(conn) {
         ON notar_monthly_status_backup.import_id = import_cpf_summary.import_id
         AND notar_monthly_status_backup.donor_id = donors.id
       WHERE imports.status = 'processed'
-        AND donors.is_active = TRUE
         AND donor_cpf_links.is_active = TRUE
       GROUP BY
         import_cpf_summary.import_id,

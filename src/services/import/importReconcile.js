@@ -6,6 +6,7 @@ import {
   queryPrepared,
   runInTransaction,
 } from "../db";
+import { RECONCILE_MATCHED_DONORS_SQL } from "./reconcileSql.js";
 
 /**
  * Reconciliation flows tying imports to donors. Three entry points share the
@@ -101,35 +102,9 @@ export async function reconcileImport(importId, { emitChange = true } = {}) {
         [importId],
       );
 
-      const matchedRows = await queryPrepared(
-        `
-        SELECT
-          import_cpf_summary.import_id,
-          strftime(import_cpf_summary.reference_month, '%Y-%m-01') AS reference_month,
-          donors.id AS donor_id,
-          donors.cpf AS donor_cpf,
-          donors.name AS donor_name,
-          donors.demand AS demand,
-          sum(import_cpf_summary.notes_count) AS notes_count,
-          sum(coalesce(import_cpf_summary.invalid_notes_count, 0)) AS invalid_notes_count
-        FROM import_cpf_summary
-        INNER JOIN donor_cpf_links
-          ON donor_cpf_links.id = import_cpf_summary.matched_source_id
-        INNER JOIN donors
-          ON donors.id = donor_cpf_links.donor_id
-        WHERE import_cpf_summary.import_id = ?
-          AND donors.is_active = TRUE
-          AND donor_cpf_links.is_active = TRUE
-        GROUP BY
-          import_cpf_summary.import_id,
-          import_cpf_summary.reference_month,
-          donors.id,
-          donors.cpf,
-          donors.name,
-          donors.demand
-      `,
-        [importId],
-      );
+      const matchedRows = await queryPrepared(RECONCILE_MATCHED_DONORS_SQL, [
+        importId,
+      ]);
 
       if (matchedRows.length > 0) {
         // Bulk insert in chunks to avoid running 1k+ statements one-by-one
