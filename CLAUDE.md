@@ -709,11 +709,26 @@ O arquivo na nuvem estava a 4 MB do limite de 50 MB do plano gratuito, e junho/2
 - **Armadilha**: `npm run lint | tail -1` devolve o status do `tail`. Um erro de lint entrou no commit 306 assim (`Buffer` sem import no helper de e2e) e foi consertado no próprio commit antes de sair do worktree.
 - 270 testes, 99/99 e2e, lint 0 erros, build OK.
 
-**Ainda aberto, na ordem do roteiro do DIAGNOSTICO.md:** etapa 1c (S1: escrita durante upload em andamento não sobe; S2: "Manter minhas alterações" não funciona) e etapa 2 (um arquivo por tabela e por mês + hidratação rápida) — esta é a que resolve de vez; a 1b só comprou uns dois meses.
+## Painel, relatório, inativos, sincronização e abertura rápida (commits 310-315)
+
+Três pedidos do usuário e duas etapas do roteiro, no branch `painel-e-inativos`. Tudo medido no `dados.json` real.
+
+- **Commit 310 — o painel acusava abatimento pendente que a Gestão Mensal não mostrava.** O usuário suspeitava de doadores de outro projeto; era isso (a lista do modal não filtrava projeto: 24 linhas do NAVE em maio) e mais: o contador usava `pending` cru, e 201 das 203 linhas "pendentes" de Moradia eram meses "Via acumulado". Mesma classe de bug do commit 216, que tinha sido corrigida só na visão de Importações. Agora a definição mora em `monthly/summaryScopeSql.js` e o bloco mensal do painel em `dashboard/monthBlockSql.js` (puro, testado). O recorte de projeto do bloco passou do vínculo de HOJE para o vínculo NO MÊS.
+- **Commit 311 — relatório de vários meses perdia os meses de quem tinha acumulado.** `addPersonToDemandGroup` tratava "tem acumulado" como "ignore o resto da pessoa". Servia ao relatório de um mês; com dois, acumulado em maio + junho importado dava relatório sem junho. Agora o acumulado absorve só o intervalo dele, e o resultado não depende da ordem dos resumos.
+- **Commit 312 — doador inativo.** Regra escolhida (literal do pedido): enquanto inativo, nada dele conta, em mês nenhum; reativar devolve tudo. É filtro de LEITURA (`summaryDonorIsActive`), aplicado em painel, evolução, ranking, visão por mês e nas três planilhas de abatimento. `reconcileImport` deixou de excluir o inativo — antes apagava o resumo dele junto com o status, e reativar trazia meses já abatidos como pendentes. As fixtures de teste que criavam resumo sem doador precisaram passar a criar o doador.
+- **Commit 313 — S1 e S2.** Revisões locais (`localRevision`/`uploadedRevision`) para o que é gravado durante um envio em andamento; e "Manter minhas alterações" adota a versão remota antes de subir. Dois testes novos no e2e de nuvem, ambos falhando antes da correção.
+- **Commit 314 — restauração rápida.** `read_json` + índices recriados depois: 80,6 s → 10,3 s no banco real, impressão digital idêntica nas 17 tabelas. Duas restrições do DuckDB descobertas no caminho, ambas documentadas em `restoreTablesFromJson`: não dá para derrubar e recriar um índice de mesmo nome na mesma transação, e um índice único criado na transação que apagou e reinseriu a mesma chave acusa duplicata no commit. Daí os três tempos (índices fora → carga em transação com conferência de unicidade por consulta → índices de volta). O caminho antigo ficou como reserva e a função devolve `{ strategy }`: se os testes passarem com `"parameters"`, o caminho rápido está quebrado e ninguém percebeu — conferir `grep "Restauração rápida indisponível"` na saída do e2e.
+- **Armadilha de teste**: `getByRole("button", { name: "Fechar" })` não existe num modal com conteúdo — o rodapé vira "Cancelar". `Escape` fecha os dois.
+- **Armadilha de shell**: heredoc longo com crases e aspas simples quebra o Bash desta sessão ("unexpected EOF"). Scripts de edição vão por arquivo.
+- 297 testes, 102/102 e2e, lint 0 erros, build OK.
+
+**Achado em aberto, que precisa do usuário (SH1 no DIAGNOSTICO.md):** a planilha de abatimento não conhece o acumulado. Na Gestão Mensal e no relatório o mês do acumulado mostra o total do intervalo; na planilha sai só o mês. São 1.896 notas em meses cobertos no banco real.
+
+**Ainda aberto, na ordem do roteiro:** etapa 2b — um arquivo por tabela e por mês. É a que resolve o limite de 50 MB de vez; a 1b só comprou uns dois meses (agosto/2026 passa do limite de novo).
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 309**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 315**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

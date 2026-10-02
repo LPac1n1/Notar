@@ -95,8 +95,8 @@ npm run dev          # http://localhost:5173
 | `npm run dev` | servidor Vite | ok |
 | `npm run build` | build de produção em `dist/` | ok (1,5 s) |
 | `npm run lint` | ESLint | 0 erros, 0 avisos |
-| `npm test` | 37 arquivos, 270 testes (`node --test`) | 270/270 |
-| `npm run test:e2e` | 41 specs Playwright (Chromium), 99 testes | 99/99 |
+| `npm test` | 40 arquivos, 297 testes (`node --test`) | 297/297 |
+| `npm run test:e2e` | 42 specs Playwright (Chromium), 102 testes | 102/102 |
 
 Variáveis (`.env`, nunca versionado):
 
@@ -379,6 +379,24 @@ que é preciso para restaurar), `schema_version`.
 - **Acumulado cobre meses.** Um mês dentro do intervalo de um acumulado
   lançado em outro mês aparece como "Via acumulado": fica fora dos totais e
   não pode ser marcado sozinho (`markSubsumedRows`, `filterOutSubsumedIds`).
+  O acumulado absorve SÓ os meses do intervalo dele; os outros meses do
+  doador são doações à parte e somam normalmente (o relatório por demanda já
+  errou isso). **A planilha de abatimento não conhece o acumulado** — soma as
+  notas mês a mês; ver DIAGNOSTICO SH1.
+- **"Conta para a apuração do projeto"** é uma definição só, em
+  `services/monthly/summaryScopeSql.js`, e toda tela que soma ou conta
+  `monthly_donor_summary` passa por ela:
+  - o doador pertencia ao projeto **no mês da linha** (`summaryBelongsToProject`);
+  - o doador está **ativo** (`summaryDonorIsActive`);
+  - "pendente" é só o que dá para resolver: com nota e não coberto por
+    acumulado de outro mês (`summaryIsActionable`).
+
+  Uma consulta nova que leia o resumo mensal sem esses fragmentos vai
+  discordar da Gestão Mensal — foi exatamente o que o Dashboard fazia.
+- **Doador inativo não conta, e nada dele é apagado.** Desativar tira o
+  doador da apuração (listas, painel, planilhas) por filtro de LEITURA. O
+  resumo mensal dele continua sendo gerado e guarda o status de abatimento
+  de cada mês; reativar devolve tudo como estava.
 - **Datas são mês.** Mês de referência é sempre o dia 1 (`startOfMonth`).
   Atenção: quem recebe `"2026-03"` precisa completar o dia antes de
   `CAST(? AS DATE)` (já causou regressão — commit 295).
@@ -404,7 +422,11 @@ AuthProvider.getSession()                                   contexts/AuthContext
       │     404 = primeiro uso; QUALQUER outro erro propaga (isObjectNotFoundError)
       ├─ fetchServerVersion(): storage.list → updated_at vira a "âncora"
       └─ restoreDatabaseSnapshot(snapshot)                   db/backup.js
-            DELETE de 18 tabelas → INSERT de 17 em blocos de 500 linhas (prepared)
+            derruba os índices → transação { DELETE de 18 tabelas;
+              uma instrução por tabela: INSERT … SELECT … FROM read_json(arquivo virtual);
+              confere por consulta as chaves dos índices únicos }
+            → recria os índices                              db/restoreSql.js
+            (se o caminho rápido falhar: reserva em blocos de 500, por parâmetro)
             → runStructuralReload() (normalizações de novo)
             → refaz credit_reconciliation (não vem do arquivo: é derivada)
    └─ setActiveCloudUser(userId)   ← só agora uploads passam a ser permitidos
@@ -412,7 +434,12 @@ AuthProvider.getSession()                                   contexts/AuthContext
 ```
 
 A barra "Restaurando notas de doação (8.500 de 30.000 linhas)…" vem do
-`onProgress`. **Este é o passo lento do sistema** — ver DIAGNOSTICO S3.
+`onProgress`. Este era o passo lento do sistema (143 s no banco real); com a
+carga pelo `read_json` ficou em ~10 s. A ordem dos três tempos — índices
+fora, carga na transação, índices de volta depois do commit — é imposta pelo
+DuckDB e está explicada em `restoreTablesFromJson`. `restoreDatabaseSnapshot`
+devolve `{ strategy }` (`"json"` ou `"parameters"`): se aparecer
+`"parameters"`, o caminho rápido falhou e o motivo está no console.
 
 **O snapshot tem 17 tabelas, não 18.** `credit_reconciliation` é derivada das
 notas e não é gravada (`DERIVED_SNAPSHOT_KEYS` em `utils/backup.js`): era 38%
@@ -433,6 +460,16 @@ serviço chama executePrepared / runInTransaction             db/connection.js
          ├─ storage.upload(..., { upsert: true })
          └─ fetchServerVersion() de novo para atualizar a âncora
 ```
+
+**Revisões.** Cada gravação soma um a `localRevision`; cada upload anota a
+revisão que o snapshot DELE continha e, ao dar certo, a registra em
+`uploadedRevision`. Sobrando diferença, outro envio é agendado. É o que faz
+uma gravação feita com um envio já no ar também subir, e é a resposta de
+`hasPendingCloudWork()`.
+
+**Conflito.** "Manter minhas alterações" adota a versão remota como vista
+(`lastKnownServerVersion`) ANTES de subir — sem isso a checagem do próprio
+upload detecta o mesmo conflito de novo e nada sobe.
 
 **Quando o upload falha:** o erro é registrado em `action_history` com
 `scheduleSync: false` — o registro não pode agendar outro upload, ou a falha
@@ -636,9 +673,9 @@ Armadilhas conhecidas:
 - O e2e exige o Chromium da versão do Playwright instalado
   (`npx playwright install chromium`).
 
-O que **não** tem teste: conflito entre dispositivos e escrita durante um
-upload em andamento (DIAGNOSTICO S1 e S2), e a importação de planilha de
-**créditos** por arquivo.
+O que **não** tem teste: a importação de planilha de **créditos** por
+arquivo, e a hidratação com volume real (o e2e usa fixtures pequenas; o
+tempo foi medido à mão com o `dados.json` de produção).
 
 Para medir com dados reais sem tocar na nuvem: baixar o `dados.json` do
 bucket e carregá-lo num servidor de dev em modo local. Imprima só agregados —

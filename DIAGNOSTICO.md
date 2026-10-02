@@ -5,7 +5,7 @@
 > fora do repositório, contra dados sintéticos e um storage falso local — o
 > Supabase real e os dados reais não foram tocados.
 
-**Situação das correções** (atualizado em 02/10/2026, commit 309)
+**Situação das correções** (atualizado em 02/10/2026, commit 315)
 
 | Item | Estado | Commit |
 |---|---|---|
@@ -16,8 +16,16 @@
 | T1/T2 — sync sem teste | **Parcial.** Existe agora um e2e em modo nuvem, contra um storage falso (3 testes) | 306, 307 |
 | T4 — e2e instável em paralelo | **Corrigido.** `workers: 2` na configuração | 308 |
 | C1 — `createEmptySnapshot` duplicado | Corrigido | 306 |
-| S1, S2 — sincronização que mente | Aberto | — |
-| S0, S3 — formato do snapshot | Aberto | — |
+| S1, S2 — sincronização que mente | **Corrigido.** Gravação durante um envio em andamento também sobe; "Manter minhas alterações" passa a subir de fato | 313 |
+| S3 — abrir é lento | **Corrigido.** Restauração de 80,6 s para 10,3 s no banco real, com o conteúdo idêntico nas 17 tabelas | 314 |
+| P-B — painel acusava pendência inexistente | **Corrigido.** Painel = Gestão Mensal nos 32 meses do banco real | 310 |
+| P-C — relatório perdia meses de quem tinha acumulado | **Corrigido** | 311 |
+| P-A — doador inativo continuava contando | **Corrigido.** Uma regra só, em todas as telas e planilhas; reativar devolve tudo | 312 |
+| S0 — arquivo único (limite de 50 MB volta em ~2 meses) | **Aberto — é a próxima etapa** | — |
+| SH1 — planilha de abatimento ignora o acumulado | **Aberto — decisão do usuário** | — |
+
+Os commits 310–315 estão no branch `painel-e-inativos`, ainda **não
+aplicados** na pasta em uso.
 
 A partir do commit 306 a conciliação é refeita toda vez que o app abre, então
 os números novos (R1) aparecem sozinhos, sem "Re-rodar conciliação".
@@ -88,11 +96,11 @@ documentação interna é incomumente boa.
 
 | Verificação | Resultado |
 |---|---|
-| `npm test` | **270/270** no commit 307 (259 no commit 299) |
+| `npm test` | **297/297** no commit 314 (259 no commit 299) |
 | `npm run lint` | 0 erros, 0 avisos |
 | `npm run build` | ok em 1,5 s; 1 aviso (`INEFFECTIVE_DYNAMIC_IMPORT`) |
 | `npm run test:e2e` | não rodava: o Playwright 1.59.1 pede o Chromium build 1217 e só havia o 1243. Instalado depois, com autorização — resultado na linha abaixo |
-| e2e, config oficial (Chromium) | 96 testes: **94 passaram, 2 falharam** em paralelo; os 2 **passaram** rodados sozinhos (`--workers=1`) |
+| e2e, config oficial (Chromium) | **102/102** no commit 314, com `workers: 2` (eram 96 no commit 299; os 6 novos cobrem o modo nuvem e o doador inativo) |
 | e2e com Edge (antes de instalar o Chromium) | 93 passaram, 3 falharam — **outros** 3, que também passaram sozinhos. Falha diferente a cada rodada = instabilidade por carga, não defeito (item T4) |
 | Cópia local × GitHub | idênticas, exceto 4 arquivos órfãos só na cópia local (item C2) |
 | `npm audit` | 4 vulnerabilidades (1 alta, 3 moderadas), todas em dependência transitiva |
@@ -168,6 +176,16 @@ número tem margem de dezenas de segundos, não de ordem de grandeza.
 | **S12** | **O limite de 50 MB do plano gratuito chega antes do limite de string.** Arquivo em 45,6 MB; maio/2026 sozinho acrescentou ~12 MB. | Medido / Suposição sobre o limite exato do plano | **Crítico** | — |
 | **S13** | ✅ **Corrigido no commit 306.** `credit_reconciliation` ia no snapshot sem precisar: é tabela derivada e respondia por 21% do JSON e **38% do arquivo comprimido** (três UUIDs aleatórios por linha, que não comprimem). Agora não é exportada, e `restoreDatabaseSnapshot` a refaz com as instruções do motor, depois do reload estrutural. Arquivos antigos continuam abrindo: a tabela gravada neles é **ignorada**, não restaurada. Validado pelo caminho de produção com o arquivo real: 43,4 → **26,8 MiB**, conciliação refeita em 4,7 s, e ida e volta idêntica em contagens, crédito por status e somas de controle. | Reproduzido (dados reais) | **A** | **B–M** |
 | **SEC11** | As mensagens de erro gravadas em `action_history` incluem o nome do doador (ex.: "Este CPF já está vinculado a …"). O log de erros exportável em Configurações carrega esses nomes. | Medido | B | B |
+
+**Achados da segunda rodada (02/10/2026), todos sobre o banco real**
+
+| # | Achado | Conf. | Estado |
+|---|---|---|---|
+| **P-B** | **O painel do projeto contava abatimento pendente com outra régua.** O contador usava `abatement_status = 'pending'` cru e o vínculo de HOJE; a lista do modal não filtrava projeto nenhum. Em Moradia, 201 das 203 linhas "pendentes" eram meses já cobertos por acumulado ("Via acumulado") e 2 não tinham nota; a lista de maio/2026 mostrava 24 doadores, todos do NAVE — um projeto sem apuração mensal, cujas 317 linhas ficam `pending` para sempre. | Reproduzido | ✅ commit 310. As condições viraram fragmentos compartilhados (`monthly/summaryScopeSql.js`): vínculo no MÊS da linha + pendente só o que dá para resolver. Painel, Gestão Mensal e visão por mês: 0 divergências em 32 meses. |
+| **P-C** | **Relatório por demanda de vários meses perdia os meses de quem tinha acumulado.** `addPersonToDemandGroup` marcava a pessoa ao ver um acumulado e passava a ignorar TODA outra linha dela — inclusive meses fora do intervalo. Acumulado em maio + junho importado = relatório de maio+junho sem junho. | Reproduzido | ✅ commit 311. O acumulado absorve só os meses do intervalo dele; os demais somam, em qualquer ordem. De quebra, o relatório de um mês coberto por acumulado de OUTRO mês deixou de repetir o valor. |
+| **P-A** | **Doador inativo continuava contando fora da lista.** A Gestão Mensal escondia o inativo; painel, evolução mensal, ranking, visão por mês e as três planilhas de abatimento, não. E `reconcileImport` apagava o resumo de quem estava inativo, com o status de abatimento junto: reativar trazia os meses de volta como pendentes. | Reproduzido | ✅ commit 312. `summaryDonorIsActive` em todos os leitores; o resumo deixou de ser apagado; reativar reconcilia os CPFs do doador. |
+| **SH1** | **A planilha de abatimento ignora o acumulado.** Ela soma as notas de cada CPF mês a mês e não sabe que um acumulado existe. O acumulado lançado em maio cobrindo abril–maio aparece como 56 notas na Gestão Mensal e no relatório, e como **28** na planilha de maio. Os meses cobertos também não saem na "Planilha dos pendentes" (ela os exclui de propósito, por já estarem "abatidos junto do acumulado"). Se cada mês coberto não tiver sido exportado na sua própria planilha, essas notas nunca chegam ao sistema de baixa. No banco: 29 acumulados, **1.896 notas** em meses cobertos que não são o mês de referência (1.745 em fev/2026, 128 em mai/2026). O bug do relatório NÃO se repete aqui: junho sai na planilha normalmente. | Medido | **Aberto.** Muda o que vai para o sistema de baixa; depende de saber como essas planilhas foram exportadas. |
+| **P-D** | Os 2 doadores hoje inativos têm notas em meses cujo resumo foi apagado por aquela reconciliação antiga. A partir do commit 312 essas linhas são recriadas como pendentes (o status que tinham se perdeu com a linha). | Medido | Conferir antes de abater, se forem reativados. |
 
 **Achados da rodada de correção**
 
@@ -282,9 +300,9 @@ Leituras:
 
 | # | Achado | Conf. | Impacto | Esforço |
 |---|---|---|---|---|
-| **S1** | **Escrita durante um upload em andamento nunca sobe.** `uploadSnapshotImmediate` devolve a promessa do upload em voo quando `isUploading` é verdadeiro e **não reagenda** (`cloudStorage.js:261-265`; o comentário diz "schedule another flush right after", o código não faz). O snapshot em voo foi montado antes da escrita. Resultado: status "Sincronizado", `hasPendingCloudWork()` falso, nenhum aviso ao fechar a aba. O dado só sobe na próxima alteração; se o usuário fechar antes, perde. | Reproduzido | **A** | **B** |
-| **S2** | **"Manter minhas alterações" não funciona.** `acknowledgeRemoteConflict` (`cloudStorage.js:189-196`) limpa a flag e chama `uploadSnapshotImmediate`, que roda `checkForRemoteChanges()` de novo (`:272`). Como `lastKnownServerVersion` não foi atualizado, o conflito é detectado outra vez e o upload é bloqueado. O banner some e volta; nada sobe, nem nas alterações seguintes. Única saída: "Recarregar", que descarta o trabalho local. | Reproduzido | **A** | **B** |
-| **S3** | **Hidratação lenta e superlinear** (`backup.js:282-442`): INSERT de 500 linhas por vez, cada valor trafegando como parâmetro pelo worker, com todos os índices ativos. Acontece em **todo** carregamento de página. Ver 3.2. | Medido | **A** | **M** |
+| **S1** | ✅ **Corrigido no commit 313** — cada gravação soma uma revisão local, cada upload registra a revisão que o snapshot dele continha, e o que sobra dispara outro envio. **Como era:** escrita durante um upload em andamento nunca subia. `uploadSnapshotImmediate` devolve a promessa do upload em voo quando `isUploading` é verdadeiro e **não reagenda** (`cloudStorage.js:261-265`; o comentário diz "schedule another flush right after", o código não faz). O snapshot em voo foi montado antes da escrita. Resultado: status "Sincronizado", `hasPendingCloudWork()` falso, nenhum aviso ao fechar a aba. O dado só sobe na próxima alteração; se o usuário fechar antes, perde. | Reproduzido | **A** | **B** |
+| **S2** | ✅ **Corrigido no commit 313** — aceitar o conflito agora adota a versão remota como vista ANTES de subir. **Como era:** "Manter minhas alterações" não funcionava. `acknowledgeRemoteConflict` (`cloudStorage.js:189-196`) limpa a flag e chama `uploadSnapshotImmediate`, que roda `checkForRemoteChanges()` de novo (`:272`). Como `lastKnownServerVersion` não foi atualizado, o conflito é detectado outra vez e o upload é bloqueado. O banner some e volta; nada sobe, nem nas alterações seguintes. Única saída: "Recarregar", que descarta o trabalho local. | Reproduzido | **A** | **B** |
+| **S3** | ✅ **Corrigido no commit 314** — o DuckDB lê o JSON de cada tabela (`read_json`), com os índices derrubados antes e recriados depois, e a unicidade conferida por consulta antes do commit. O caminho antigo ficou como reserva. No banco real: 80,6 s → 10,3 s, impressão digital idêntica nas 17 tabelas. **Como era:** hidratação lenta e superlinear (`backup.js:282-442`): INSERT de 500 linhas por vez, cada valor trafegando como parâmetro pelo worker, com todos os índices ativos. Acontece em **todo** carregamento de página. Ver 3.2. | Medido | **A** | **M** |
 | **S4** | **Não há cache local**: recarregar a aba, abrir segunda aba ou clicar "Recarregar" no aviso de conflito refaz download + restore completos, mesmo que nada tenha mudado. | Lido | **A** (percepção) | **M–A** |
 | **S5** | **Cada alteração reenvia o banco inteiro** e faz 3 requisições (`list` antes, `upload`, `list` depois — `cloudStorage.js:272`, `:308`, `:323`). No meu cenário de 3 anos já são 5,5 MB por gravação, o limiar que o projeto definiu para a sync incremental. | Medido | **M** (cresce) | **B** (cortar requisições) / **A** (incremental) |
 | **S6** | **O snapshot pode sair inconsistente.** `exportSnapshotText` faz 18 SELECTs em sequência, fora de transação, na mesma conexão que as escritas (`backup.js:256-281`). Se o temporizador disparar no meio de uma `runInTransaction` longa (uma importação), o export lê estado parcial e não confirmado, e sobe. Se a transação depois falhar, a nuvem fica com dado que nunca existiu, até o próximo upload. | Lido | **M** | **B–M** |
@@ -415,16 +433,17 @@ pelo usuário e conferido idêntico ao arquivo da nuvem.
   e limite.
 - Custo zero é requisito (confirmado), então subir de plano está fora.
 
-**Etapa 1c — Parar de perder sincronização** (S1, S2, T1)
-- Transformar o storage falso em teste e2e que falha hoje pelos dois motivos.
-- S1: registrar "houve alteração depois do snapshot em voo" e disparar novo
-  upload ao terminar.
-- S2: ao aceitar o conflito, adotar a versão remota como conhecida antes de
-  subir.
-- Risco baixo: ~30 linhas de um arquivo. O teste criado aqui é o que vai
-  proteger a troca de formato da etapa 2.
+**Etapa 1c — Parar de perder sincronização** (S1, S2, T1) — ✅ feita (commit 313)
 
-**Etapa 2 — Trocar o formato do snapshot** (S0, S3, S5, S9 — a etapa que importa)
+**Etapa 2a — Abrir rápido** (S3) — ✅ feita (commit 314)
+
+**Pedidos do usuário** — ✅ feitos: painel (310), relatório (311), doador
+inativo (312)
+
+**Aplicar na pasta em uso** — pendente: exige backup exportado, porque
+recarrega a aba.
+
+**Etapa 2b — Trocar o formato do snapshot** (S0, S5, S9 — a próxima, e a que resolve o limite de vez)
 - Sair de "um JSON com tudo" para **um arquivo por tabela** (e, nas três
   tabelas grandes, **por mês de referência**), com um manifesto pequeno que
   lista os arquivos e suas versões.
@@ -507,11 +526,19 @@ O que o código não responde. Onde eu tinha um palpite, está marcado.
   a nuvem em todas as tabelas). O app é usado só por `npm run dev`, nunca em
   dois computadores ao mesmo tempo.
 
+- Junho/2026 foi importado (o usuário já gerou relatórios de maio+junho).
+- Autorizado seguir para a etapa 1c e para a etapa 2.
+
 **Em aberto**
 
-1. Junho/2026 subiu depois de importado de novo? (É o teste de verdade da
-   etapa 1b.)
-2. Posso seguir para a etapa 1c (S1 e S2) e depois para a etapa 2?
+1. **Planilha de abatimento × acumulado (SH1):** a linha do mês do acumulado
+   deve levar as notas dos meses que ele cobre? E as planilhas de fev/2026 e
+   mai/2026 que foram para o sistema de baixa — saíram com o valor do mês ou
+   com o do acumulado?
+2. **Doador inativo:** hoje a regra é "enquanto estiver inativo, nada dele
+   conta, em mês nenhum". A alternativa é "não conta a partir do mês da
+   desativação" (os meses anteriores continuariam nos relatórios). Qual?
+3. A sincronização de junho terminou como "Sincronizado"?
 3. Você disse que usa CSV e XLSX, mas todas as importações gravadas são CSV.
    O XLSX é convertido antes, ou era de planilhas que foram reimportadas?
 4. **Onde o app está hospedado** em produção? Não há configuração de deploy no
