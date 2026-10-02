@@ -722,13 +722,25 @@ Três pedidos do usuário e duas etapas do roteiro, no branch `painel-e-inativos
 - **Armadilha de shell**: heredoc longo com crases e aspas simples quebra o Bash desta sessão ("unexpected EOF"). Scripts de edição vão por arquivo.
 - 297 testes, 102/102 e2e, lint 0 erros, build OK.
 
+## Doador desativado conta até o mês anterior à desativação (commits 316-317)
+
+Resposta do usuário à pergunta deixada no commit 312: **preservar os meses anteriores nos totais.**
+
+- A regra virou por mês e mora num fragmento só, `donorCountsAtMonth(monthExpr, donorAlias)` em `monthly/summaryScopeSql.js`: conta se o doador está ativo, ou se o mês é anterior à ÚLTIMA desativação registrada em `donor_activity_history`. `summaryDonorIsActive`/`cpfSummaryDonorIsActive` viraram `summaryDonorCounts`/`cpfSummaryDonorCounts`.
+- **Eu tinha dito que era mudança de um fragmento, e não era:** as duas listas da Gestão Mensal (`listByMonth`, `listHistorical`) e as três planilhas de abatimento filtravam por `donors.is_active` por conta própria. Com a regra só nos totais, o painel contaria abril de quem a lista de abril esconde — o mesmo tipo de divergência do commit 310. Todos passaram a usar o fragmento; a linha de acumulado montada em JS usa `donorCountsAtMonthValue`, que fica ao lado da versão SQL.
+- A condição é embrulhada em `coalesce` para nunca dar NULL: quem a nega (`NOT …`) perderia a linha de um inativo sem evento de desativação.
+- **Escolha que o usuário não fez e que ficou registrada:** reativado, o doador volta a contar em TODOS os meses, inclusive os do período inativo. A alternativa ("período inativo nunca conta") deixaria sem volta uma desativação feita por engano, porque a reativação exige mês posterior ao da desativação. Sem efeito no banco real hoje: não existe nenhum evento de reativação.
+- **O que o banco real mostrou:** os 2 inativos foram desativados a partir de mai/2026 e têm 9 linhas de resumo apagadas em meses anteriores (P-D no DIAGNOSTICO.md). Com a regra nova esses meses contam, mas a linha não existe; qualquer reconciliação daquelas importações as recria como pendentes em meses já fechados. Perguntado ao usuário; nada foi recriado.
+- No banco real: painel = Gestão Mensal = visão por mês nos 32 meses, zero mês com pendência, 527–666 ms no mês mais lento (painel + lista).
+- 303 testes (6 novos, verificados por mutação: 8 falham com a comparação invertida), 102/102 e2e, lint 0 erros, build OK.
+
 **Achado em aberto, que precisa do usuário (SH1 no DIAGNOSTICO.md):** a planilha de abatimento não conhece o acumulado. Na Gestão Mensal e no relatório o mês do acumulado mostra o total do intervalo; na planilha sai só o mês. São 1.896 notas em meses cobertos no banco real.
 
 **Ainda aberto, na ordem do roteiro:** etapa 2b — um arquivo por tabela e por mês. É a que resolve o limite de 50 MB de vez; a 1b só comprou uns dois meses (agosto/2026 passa do limite de novo).
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 315**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 317**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

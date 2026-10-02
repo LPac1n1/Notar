@@ -387,16 +387,24 @@ que é preciso para restaurar), `schema_version`.
   `services/monthly/summaryScopeSql.js`, e toda tela que soma ou conta
   `monthly_donor_summary` passa por ela:
   - o doador pertencia ao projeto **no mês da linha** (`summaryBelongsToProject`);
-  - o doador está **ativo** (`summaryDonorIsActive`);
+  - as doações do doador **contam naquele mês** (`summaryDonorCounts`, sobre
+    `donorCountsAtMonth`): sempre, se ele está ativo; só nos meses anteriores
+    ao mês da desativação, se está inativo;
   - "pendente" é só o que dá para resolver: com nota e não coberto por
     acumulado de outro mês (`summaryIsActionable`).
 
   Uma consulta nova que leia o resumo mensal sem esses fragmentos vai
   discordar da Gestão Mensal — foi exatamente o que o Dashboard fazia.
-- **Doador inativo não conta, e nada dele é apagado.** Desativar tira o
-  doador da apuração (listas, painel, planilhas) por filtro de LEITURA. O
-  resumo mensal dele continua sendo gerado e guarda o status de abatimento
-  de cada mês; reativar devolve tudo como estava.
+- **Doador desativado sai da apuração do mês da desativação em diante, e
+  nada dele é apagado.** "Inativo a partir de maio" tira maio e os meses
+  seguintes das listas, do painel e das planilhas; abril e os anteriores, em
+  que ele doou como ativo, continuam contando. É filtro de LEITURA
+  (`donorCountsAtMonth`, em `summaryScopeSql.js` — a Gestão Mensal, o
+  painel e as planilhas de abatimento usam o mesmo fragmento). O resumo
+  mensal dele continua sendo gerado e guarda o status de abatimento de cada
+  mês; reativar devolve tudo, inclusive os meses em que esteve inativo.
+  Inativo sem evento em `donor_activity_history` não conta em mês nenhum
+  (não há como saber desde quando).
 - **Datas são mês.** Mês de referência é sempre o dia 1 (`startOfMonth`).
   Atenção: quem recebe `"2026-03"` precisa completar o dia antes de
   `CAST(? AS DATE)` (já causou regressão — commit 295).
