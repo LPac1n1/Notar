@@ -698,11 +698,22 @@ Sessão de reconhecimento pedida pelo usuário ("dominar o sistema antes de mexe
 - **Armadilha de shell**: encadear com `;` depois de um `cd` que falhou roda o resto na pasta errada — um `npm ci` quase rodou na pasta em uso. Usar `&&`.
 - 263 testes, 96/96 e2e (com `--workers=2`; em paralelo total 2–4 falham por carga, diferentes a cada rodada), lint 0 erros, build OK.
 
-**Próximo passo acordado no roteiro, ainda não autorizado:** etapa 1b — tirar `credit_reconciliation` do snapshot (tabela derivada, 38% do arquivo) e interromper o laço "falha de upload → registro do erro → novo upload" (S14, reproduzido).
+## Voltar a sincronizar: snapshot sem a conciliação + fim do laço de falha (commits 306-309)
+
+O arquivo na nuvem estava a 4 MB do limite de 50 MB do plano gratuito, e junho/2026 não subia. Custo zero é requisito do usuário.
+
+- **Commit 306 — a conciliação saiu do snapshot.** `credit_reconciliation` é derivada das notas; gravá-la custava 38% do arquivo comprimido (três UUIDs aleatórios por linha não comprimem). `SNAPSHOT_SOURCES` tem 17 tabelas; `restoreDatabaseSnapshot` refaz a conciliação com `CREDIT_RECONCILE_STATEMENTS` **depois** do `runStructuralReload()` — é o reload que preenche `match_key`/`valor_cents` em backups antigos, e conciliar antes deixaria tudo sem par. Arquivo antigo que traz a tabela é aceito e a tabela é **ignorada** (`DERIVED_SNAPSHOT_KEYS`). Validado com o arquivo real pelo caminho de produção: 43,4 → 26,8 MiB, ida e volta idêntica em contagens, crédito por status e somas de controle. Efeito colateral bom: a regra nova das "Repetidas" (commit 303) passa a valer para o banco existente sem ninguém clicar em nada. `createEmptySnapshot` duplicado em `cloudStorage.js` (que já tinha divergido) foi removido.
+- **Primeiro e2e em modo nuvem.** `e2e/helpers/fakeStorage.js` é um Supabase Storage de mentira (porta 4175) e o `playwright.config.js` sobe um segundo servidor de dev (porta 4174) apontado para ele. O modo de autenticação é fixado quando o dev server sobe, então o mesmo servidor não serve aos dois casos. A sessão falsa vai por `localStorage` na chave `sb-127-auth-token` (o cliente usa o primeiro rótulo do host). Os testes dividem a porta do storage: mesmo arquivo, em série.
+- **Commit 307 — o laço de falha.** Bug real, relatado pelo usuário e reproduzido: upload falha → `logError` grava em `action_history` → toda gravação agenda upload → falha de novo. Uma alteração virava uma tentativa a cada 2 s, cada uma exportando o banco inteiro. Corrigido em duas partes: `executePrepared` ganhou `scheduleSync` (o registro de erro grava e avisa as telas, mas não agenda upload), e a nova tentativa passou a ser explícita, com espera crescente e fim (`nextUploadRetryDelay`). O contador de falhas só zera em upload bem-sucedido — zerar a cada alteração recomeçaria a série contra uma falha permanente. `hasPendingCloudWork()` inclui o estado de erro; em contrapartida o `beforeunload` **não** envia quando há conflito pendente, porque esse caminho pula a checagem de conflito.
+- **Commit 308** — `workers: 2` no Playwright. Em paralelo total, 2 a 4 testes diferentes falhavam por carga a cada rodada.
+- **Armadilha**: `npm run lint | tail -1` devolve o status do `tail`. Um erro de lint entrou no commit 306 assim (`Buffer` sem import no helper de e2e) e foi consertado no próprio commit antes de sair do worktree.
+- 270 testes, 99/99 e2e, lint 0 erros, build OK.
+
+**Ainda aberto, na ordem do roteiro do DIAGNOSTICO.md:** etapa 1c (S1: escrita durante upload em andamento não sobe; S2: "Manter minhas alterações" não funciona) e etapa 2 (um arquivo por tabela e por mês + hidratação rápida) — esta é a que resolve de vez; a 1b só comprou uns dois meses.
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 305**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 309**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.

@@ -5,20 +5,22 @@
 > fora do repositório, contra dados sintéticos e um storage falso local — o
 > Supabase real e os dados reais não foram tocados.
 
-**Situação das correções** (atualizado em 01/10/2026, commit 304)
+**Situação das correções** (atualizado em 02/10/2026, commit 309)
 
 | Item | Estado | Commit |
 |---|---|---|
 | I1 — conciliação quadrática | **Corrigido.** 707 s → 7,2 s no banco real, resultado idêntico ao centavo | 301 (extração + teste), 302 |
 | R1 — "Repetidas" ignorava o valor | **Corrigido.** 57.345 notas e R$ 28.683,83 de crédito passam a conciliar | 303 |
-| S12/S13 — limite de 50 MB | **Aberto — é o que impede a sincronização hoje** | — |
-| S14 — falha de upload em laço | **Aberto** | — |
+| S12/S13 — limite de 50 MB | **Corrigido por ora.** A conciliação saiu do arquivo: 43,4 → 26,8 MiB no banco real. Dá uns dois meses de folga; a solução definitiva é a etapa 2 | 306 |
+| S14 — falha de upload em laço | **Corrigido.** 6 tentativas em 12 s → no máximo 2, e a alteração chega sozinha quando o storage volta | 307 |
+| T1/T2 — sync sem teste | **Parcial.** Existe agora um e2e em modo nuvem, contra um storage falso (3 testes) | 306, 307 |
+| T4 — e2e instável em paralelo | **Corrigido.** `workers: 2` na configuração | 308 |
+| C1 — `createEmptySnapshot` duplicado | Corrigido | 306 |
 | S1, S2 — sincronização que mente | Aberto | — |
 | S0, S3 — formato do snapshot | Aberto | — |
 
-As correções estão no branch `correcoes-conciliacao`. Para os números do
-banco existente mudarem, é preciso rodar a conciliação uma vez depois de
-aplicar (botão "Re-rodar conciliação" em Importações, ou a próxima importação).
+A partir do commit 306 a conciliação é refeita toda vez que o app abre, então
+os números novos (R1) aparecem sozinhos, sem "Re-rodar conciliação".
 
 **Legenda de confiança**
 
@@ -86,7 +88,7 @@ documentação interna é incomumente boa.
 
 | Verificação | Resultado |
 |---|---|
-| `npm test` | **263/263** (259 no commit 299; +4 do teste nota a nota da conciliação) |
+| `npm test` | **270/270** no commit 307 (259 no commit 299) |
 | `npm run lint` | 0 erros, 0 avisos |
 | `npm run build` | ok em 1,5 s; 1 aviso (`INEFFECTIVE_DYNAMIC_IMPORT`) |
 | `npm run test:e2e` | não rodava: o Playwright 1.59.1 pede o Chromium build 1217 e só havia o 1243. Instalado depois, com autorização — resultado na linha abaixo |
@@ -164,14 +166,14 @@ número tem margem de dezenas de segundos, não de ordem de grandeza.
 | **I1** | ✅ **Corrigido no commit 302.** Uma condição `OR` tornava a conciliação quadrática: os passos `matched` e `divergent` usavam `NOT EXISTS (… WHERE credit_note_id = X OR donation_note_id = Y)`, e com 115 mil linhas de "repetidas" já na tabela o banco não conseguia usar junção por igualdade. Virou dois `NOT EXISTS` ligados por `AND` (`NÃO (A OU B)` = `NÃO A E NÃO B`). O SQL saiu do motor para `reconciliation/creditReconcileSql.js` (commit 301, extração provada idêntica instrução por instrução) e ganhou um teste que confere o resultado **nota a nota**. No banco real, pelo código de produção: **707 s → 7,2 s**, mesmas contagens nos seis status e mesmo crédito por status, ao centavo. | Reproduzido (dados reais) | **A** | **B** |
 | **R1** | ✅ **Corrigido no commit 303**, com a confirmação do usuário de que mesma chave com valor diferente é outra nota. A repetição passou a ser checada por CNPJ + número + **valor**. `divergent` continua exigindo uma única nota de cada lado sob a chave — sem isso, várias notas sem par gerariam pares cruzados e crédito contado em dobro (o teste falha se essa restrição for removida). No banco real: conciliadas 190.264 → **247.609**; repetidas 57.432 → **87** de cada lado; crédito conciliado R$ 289.998,15 → **R$ 318.681,98**. `credit_only` (1.728), `donation_only` (27) e `divergent` (12) não mudaram, o crédito total se conserva (R$ 318.916,41) e cada nota válida aparece exatamente uma vez. | Reproduzido (dados reais) | **A** | **M** |
 | **S12** | **O limite de 50 MB do plano gratuito chega antes do limite de string.** Arquivo em 45,6 MB; maio/2026 sozinho acrescentou ~12 MB. | Medido / Suposição sobre o limite exato do plano | **Crítico** | — |
-| **S13** | **`credit_reconciliation` vai no snapshot sem precisar.** É tabela derivada, reconstruída inteira pela conciliação, e responde por 21% do JSON e **38% do arquivo comprimido** (são três UUIDs aleatórios por linha, que não comprimem). Tirá-la e reconstruir ao abrir — o que só é viável depois de I1 — leva o arquivo de 43,4 para 26,8 MiB. | Medido | **A** como fôlego imediato | **B–M** |
+| **S13** | ✅ **Corrigido no commit 306.** `credit_reconciliation` ia no snapshot sem precisar: é tabela derivada e respondia por 21% do JSON e **38% do arquivo comprimido** (três UUIDs aleatórios por linha, que não comprimem). Agora não é exportada, e `restoreDatabaseSnapshot` a refaz com as instruções do motor, depois do reload estrutural. Arquivos antigos continuam abrindo: a tabela gravada neles é **ignorada**, não restaurada. Validado pelo caminho de produção com o arquivo real: 43,4 → **26,8 MiB**, conciliação refeita em 4,7 s, e ida e volta idêntica em contagens, crédito por status e somas de controle. | Reproduzido (dados reais) | **A** | **B–M** |
 | **SEC11** | As mensagens de erro gravadas em `action_history` incluem o nome do doador (ex.: "Este CPF já está vinculado a …"). O log de erros exportável em Configurações carrega esses nomes. | Medido | B | B |
 
 **Achados da rodada de correção**
 
 | # | Achado | Conf. | Impacto | Esforço |
 |---|---|---|---|---|
-| **S14** | **Uma falha de upload gera a próxima tentativa, sem parar.** `performUpload` falha → `logError("cloudStorage.upload")` → `createActionHistoryEntry` grava em `action_history` → toda gravação agenda um upload 2 s depois (`scheduleCloudFlush`) → falha de novo. Não há limite nem espera crescente. Cada volta exporta o banco inteiro, congela a tela e tenta subir dezenas de MB. É o comportamento relatado pelo usuário ao importar junho ("ficava dando falha e reiniciando a tentativa, sem parar"), e explica as 42 linhas `cloudStorage.upload` no histórico. Reproduzido contra um storage falso que recusa todo upload: **uma** alteração gerou 13 tentativas em 30 s (uma a cada 2,2 s), 13 erros gravados, e seguia tentando. | Reproduzido | **A** | **B** |
+| **S14** | ✅ **Corrigido no commit 307** — o registro de erro não agenda mais sincronização (`executePrepared(..., { scheduleSync: false })`), e a nova tentativa passou a ter espera crescente (5 s, 15 s, 45 s, 2 min, 5 min) e fim; depois disso, só por nova alteração, aba em segundo plano, rede voltando ou "Sincronizar agora". Enquanto houver falha pendente o navegador avisa antes de fechar a aba. **Como era:** uma falha de upload gerava a próxima tentativa, sem parar. `performUpload` falha → `logError("cloudStorage.upload")` → `createActionHistoryEntry` grava em `action_history` → toda gravação agenda um upload 2 s depois (`scheduleCloudFlush`) → falha de novo. Não há limite nem espera crescente. Cada volta exporta o banco inteiro, congela a tela e tenta subir dezenas de MB. É o comportamento relatado pelo usuário ao importar junho ("ficava dando falha e reiniciando a tentativa, sem parar"), e explica as 42 linhas `cloudStorage.upload` no histórico. Reproduzido contra um storage falso que recusa todo upload: **uma** alteração gerou 13 tentativas em 30 s (uma a cada 2,2 s), 13 erros gravados, e seguia tentando. | Reproduzido | **A** | **B** |
 | **OPS1** | **O app em uso roda de `npm run dev` nesta pasta.** Havia um servidor Vite ativo na porta 5173 durante o trabalho. Como o banco vive na memória da aba, **editar qualquer arquivo de `src/` recarrega a aba e apaga o que não sincronizou**. Por isso as correções foram feitas num worktree fora da pasta. Vale como regra: nunca alterar `src/` na pasta em uso sem um backup exportado. | Medido | **A** | — |
 | **DEP5** | `npm ci` falha nesta máquina (npm 11): `package-lock.json` fora de sincronia (`@emnapi/core` e `@emnapi/runtime` ausentes). O CI usa `npm ci`; não verifiquei se lá passa. | Reproduzido | M se o CI estiver vermelho | B |
 | **OPS2** | Sem identidade de git configurada na máquina (`user.name`/`user.email`). Os commits 300–304 usaram, só na linha de comando, o autor que já aparece no histórico. | Medido | B | B |
@@ -349,7 +351,7 @@ para cobrir essa camada (item T1).
 
 | # | Achado | Conf. | Impacto | Esforço |
 |---|---|---|---|---|
-| C1 | `createEmptySnapshot` existe duas vezes e **já divergiu**: a de `cloudStorage.js:505-524` não tem `projects` nem `donorProjectAssignments`; a de `utils/backup.js` tem. Inofensivo hoje porque `normalizeSnapshotPayload` completa. | Lido | B | B |
+| C1 | ✅ Corrigido no commit 306 (`cloudStorage.js` passou a usar a de `utils/backup.js`). `createEmptySnapshot` existia duas vezes e **já tinha divergido**: a de `cloudStorage.js:505-524` não tem `projects` nem `donorProjectAssignments`; a de `utils/backup.js` tem. Inofensivo hoje porque `normalizeSnapshotPayload` completa. | Lido | B | B |
 | C2 | **4 arquivos órfãos só na cópia local**, removidos do git nos commits 249, 259 e 274: `DashboardCurrentMonthBanner.jsx`, `DashboardDemandBreakdownSection.jsx`, `DashboardLatestMonthSection.jsx` e `MetricCard.jsx` em `src/features/dashboard/components/`. Ninguém os importa. Sinal de que a pasta foi atualizada copiando arquivos por cima. | Medido | B | B |
 | C3 | `services/calculationService.js` (`calculateValue`) só é usado pelo próprio teste. | Medido | B | B |
 | C4 | `Monthly.jsx` (993 linhas) e `Donors.jsx` (863) seguem grandes. Decisão já registrada e justificada. | Medido | B | A |
@@ -360,10 +362,10 @@ para cobrir essa camada (item T1).
 
 | # | Achado | Conf. | Impacto | Esforço |
 |---|---|---|---|---|
-| T1 | **`cloudStorage.js` (597 linhas) não tem teste de orquestração.** Os testes existentes cobrem só as funções puras extraídas. S1 e S2 estão exatamente na parte descoberta. | Medido | **A** | M |
+| T1 | **Parcialmente coberto desde os commits 306–307**: `e2e/cloud-sync.spec.js` roda o app em modo nuvem contra um storage falso (`e2e/helpers/fakeStorage.js`) e cobre enviar, hidratar, arquivo antigo e falha de upload. Faltam conflito entre dispositivos e escrita durante upload (S1, S2). **Como era:** `cloudStorage.js` (597 linhas) não tinha teste de orquestração. Os testes existentes cobrem só as funções puras extraídas. S1 e S2 estão exatamente na parte descoberta. | Medido | **A** | M |
 | T2 | O e2e roda só em modo local: nunca passa por hidratação, upload, conflito ou tela de login. | Lido | A | M |
 | T3 | **Importação da planilha de créditos por arquivo não tem teste e2e.** Não há CSV de créditos em `e2e/fixtures`; os dados de crédito entram só por backup. `creditImportPipeline.js` tem 778 linhas. | Medido | M–A | M |
-| T4 | e2e instável em paralelo nesta máquina (2 a 3 de 96 por rodada, testes diferentes a cada vez, todos passam sozinhos). `playwright.config.js` não limita `workers`, e localmente `retries` é 0. | Reproduzido | B–M | B |
+| T4 | ✅ Corrigido no commit 308 (`workers: 2`; quatro rodadas completas seguidas sem falha). **Como era:** e2e instável em paralelo nesta máquina (2 a 3 de 96 por rodada, testes diferentes a cada vez, todos passam sozinhos). `playwright.config.js` não limita `workers`, e localmente `retries` é 0. | Reproduzido | B–M | B |
 | T5 | Nenhum teste protege desempenho. A hidratação pode piorar sem ninguém notar. | Lido | M | B–M |
 | D1 | **Documentos se contradizem.** Agência/conta da planilha de abatimento: o código usa **1** (`abatementSheetWorkbook.js:38-39`), o README diz 1, o CLAUDE.md diz 0. Selo do README: "235 unit + 88 e2e"; real: 259 e 96. CLAUDE.md manda coassinar como "Claude Sonnet 4.6". | Medido | B | B |
 | D2 | **O CLAUDE.md tem 118 kB** e é carregado inteiro em toda sessão. Boa parte é histórico de fases que descrevem código já removido (OPFS, CommandPalette, `escapeSqlString`). Custa contexto e mistura o que vale hoje com o que valeu. | Medido | M | B–M |
@@ -400,13 +402,10 @@ a lentidão → higiene.** Cada etapa é pequena, tem teste antes e número depo
 
 **Regra das "Repetidas"** (R1) — ✅ feita (commit 303)
 
-**Aplicar na pasta em uso** — pendente, depende de você
-- Exportar um backup em toda aba aberta do app (OPS1).
-- `git merge --ff-only correcoes-conciliacao` na pasta, e apagar os 4
-  arquivos órfãos.
-- Em Importações, "Re-rodar conciliação" uma vez.
+**Aplicar na pasta em uso** — ✅ feito em 02/10/2026, com backup exportado
+pelo usuário e conferido idêntico ao arquivo da nuvem.
 
-**Etapa 1b — Voltar a sincronizar** (S12, S13, S14) — *a próxima; é o que destrava junho*
+**Etapa 1b — Voltar a sincronizar** (S12, S13, S14) — ✅ feita (commits 306, 307)
 - Parar de gravar `credit_reconciliation` no snapshot e reconstruí-la ao
   abrir. Arquivo cai de 43,4 para 26,8 MiB — uns dois meses de folga.
 - Depende da etapa 1 (sem ela, abrir custaria 12 minutos a mais).
@@ -504,20 +503,24 @@ O que o código não responde. Onde eu tinha um palpite, está marcado.
   várias vezes e a sincronização falha em laço (S14).
 - Custo zero é requisito; alternativas ao Supabase são bem-vindas.
 
+- A aba não tinha alterações por subir (o backup exportado em 01/10 bate com
+  a nuvem em todas as tabelas). O app é usado só por `npm run dev`, nunca em
+  dois computadores ao mesmo tempo.
+
 **Em aberto**
 
-1. A aba do app que está aberta agora tem alterações que não subiram?
-   Há um backup exportado dela?
-2. Posso seguir para a etapa 1b (tirar a tabela derivada do snapshot e
-   interromper o laço de falha)?
+1. Junho/2026 subiu depois de importado de novo? (É o teste de verdade da
+   etapa 1b.)
+2. Posso seguir para a etapa 1c (S1 e S2) e depois para a etapa 2?
 3. Você disse que usa CSV e XLSX, mas todas as importações gravadas são CSV.
    O XLSX é convertido antes, ou era de planilhas que foram reimportadas?
 4. **Onde o app está hospedado** em produção? Não há configuração de deploy no
    repositório.
 5. Quantas pessoas usam ao mesmo tempo, em quantos computadores? O aviso
    "Os dados foram atualizados em outro dispositivo" aparece com frequência?
-6. O app é sempre usado por `npm run dev` nesta pasta, em todos os
-   computadores (com o OneDrive levando o código de um para o outro)?
+6. Em produção só existe `npm run dev`: vale a pena servir uma build
+   (`npm run build` + `npm run preview`)? Abre mais rápido e não recarrega a
+   aba quando um arquivo muda.
 
 **Negócio**
 

@@ -95,8 +95,8 @@ npm run dev          # http://localhost:5173
 | `npm run dev` | servidor Vite | ok |
 | `npm run build` | build de produção em `dist/` | ok (1,5 s) |
 | `npm run lint` | ESLint | 0 erros, 0 avisos |
-| `npm test` | 37 arquivos, 263 testes (`node --test`) | 263/263 |
-| `npm run test:e2e` | 40 specs Playwright (Chromium) | ver seção 10 |
+| `npm test` | 37 arquivos, 270 testes (`node --test`) | 270/270 |
+| `npm run test:e2e` | 41 specs Playwright (Chromium), 99 testes | 99/99 |
 
 Variáveis (`.env`, nunca versionado):
 
@@ -404,14 +404,21 @@ AuthProvider.getSession()                                   contexts/AuthContext
       │     404 = primeiro uso; QUALQUER outro erro propaga (isObjectNotFoundError)
       ├─ fetchServerVersion(): storage.list → updated_at vira a "âncora"
       └─ restoreDatabaseSnapshot(snapshot)                   db/backup.js
-            DELETE de 18 tabelas → INSERT em blocos de 500 linhas (prepared)
+            DELETE de 18 tabelas → INSERT de 17 em blocos de 500 linhas (prepared)
             → runStructuralReload() (normalizações de novo)
+            → refaz credit_reconciliation (não vem do arquivo: é derivada)
    └─ setActiveCloudUser(userId)   ← só agora uploads passam a ser permitidos
    └─ notifyDatabaseChanged({ source: "cloud-hydrate" })
 ```
 
 A barra "Restaurando notas de doação (8.500 de 30.000 linhas)…" vem do
 `onProgress`. **Este é o passo lento do sistema** — ver DIAGNOSTICO S3.
+
+**O snapshot tem 17 tabelas, não 18.** `credit_reconciliation` é derivada das
+notas e não é gravada (`DERIVED_SNAPSHOT_KEYS` em `utils/backup.js`): era 38%
+do arquivo comprimido. Arquivos antigos que a trazem são aceitos e a tabela
+gravada neles é ignorada — o resultado segue sempre a regra de conciliação
+atual. Vale igual para o backup manual, que usa as mesmas funções.
 
 ### 8.2 Salvar uma alteração (upload)
 
@@ -421,11 +428,19 @@ serviço chama executePrepared / runInTransaction             db/connection.js
    └─ uploadSnapshotImmediate(userId)                        db/cloudStorage.js
       ├─ checkForRemoteChanges(): storage.list; se mudou → banner de conflito, upload bloqueado
       └─ performUpload()
-         ├─ exportSnapshotText(): 18 SELECTs com json_group_array   db/backup.js, snapshotSources.js
+         ├─ exportSnapshotText(): 17 SELECTs com json_group_array   db/backup.js, snapshotSources.js
          ├─ compressSnapshot(): gzip via CompressionStream           db/snapshotCodec.js
          ├─ storage.upload(..., { upsert: true })
          └─ fetchServerVersion() de novo para atualizar a âncora
 ```
+
+**Quando o upload falha:** o erro é registrado em `action_history` com
+`scheduleSync: false` — o registro não pode agendar outro upload, ou a falha
+vira laço (já aconteceu). A nova tentativa é de `scheduleUploadRetry()`, com
+esperas de `UPLOAD_RETRY_DELAYS_MS` (5 s a 5 min) e fim. Esgotadas, só um
+gatilho de fora tenta de novo: nova alteração, aba em segundo plano, evento
+`online` ou "Sincronizar agora". `hasPendingCloudWork()` continua verdadeiro
+enquanto o estado for de erro, para o navegador avisar antes de fechar.
 
 Camadas de proteção ao sair: `visibilitychange→hidden` e `pagehide` disparam
 flush normal; `beforeunload` tenta `fetch(keepalive)` (limite ~60 KB) e mostra
@@ -560,6 +575,9 @@ Exclusões vão para `trash_items` com payload de restauração
   o teste de integração rodar **a consulta de produção**. Esses módulos usam
   import com extensão `.js` (o Node não resolve sem).
 - Escrita em massa: blocos de 200–500 linhas, tuplas de `?`.
+- Gravação que NÃO é trabalho do usuário (hoje: o registro de erros) passa
+  `{ scheduleSync: false }` a `executePrepared`: grava e avisa as telas, mas
+  não agenda upload.
 - Mais de uma escrita relacionada → `runInTransaction`, com
   `{ changeSource, changeDomains }`. (`execute`/`executePrepared` usam
   `{ source, domains }` — nomes diferentes, já causou bug silencioso.)
@@ -597,6 +615,7 @@ Exclusões vão para `trash_items` com payload de restauração
 | Unit | `tests/*.test.js` | utils, descrição/datas da planilha de abatimento, decisões de sync, codec do snapshot, busca por texto |
 | Integração | `tests/*.test.js` com `helpers/duckdbHelper.js` | migrations reais + as consultas `*Sql.js` contra DuckDB no Node |
 | E2E | `e2e/*.spec.js` | fluxos no navegador em **modo local** (sem Supabase) |
+| E2E em modo nuvem | `e2e/cloud-sync.spec.js` | hidratar, enviar, arquivo antigo e falha de upload, contra um Supabase Storage de mentira (`e2e/helpers/fakeStorage.js`, porta 4175) e um segundo servidor de dev (porta 4174) |
 
 Armadilhas conhecidas:
 
@@ -604,6 +623,11 @@ Armadilhas conhecidas:
   `LIKE '%' || ? || '%'` dentro de prepared statement. Nesses casos: teste
   unitário do SQL gerado + validação por e2e.
 - **Não rode lint/build junto com o e2e** — a carga provoca timeouts falsos.
+  A configuração limita a 2 workers pelo mesmo motivo.
+- `npm run lint | tail` devolve o status do `tail`: confira o código de saída
+  do ESLint, não a última linha.
+- Os testes de `cloud-sync.spec.js` dividem um storage numa porta fixa:
+  ficam todos no mesmo arquivo e rodam em série.
 - Seletor por nome no Playwright casa por trecho ("Abater em massa" casa com
   "Desabater em massa"): use `exact: true`.
 - `MonthlySummaryRow` renderiza cada doador duas vezes (mobile + desktop).
@@ -612,8 +636,9 @@ Armadilhas conhecidas:
 - O e2e exige o Chromium da versão do Playwright instalado
   (`npx playwright install chromium`).
 
-O que **não** tem teste: a orquestração do cloud sync (debounce, upload,
-conflito, hidratação) e a importação de planilha de **créditos** por arquivo.
+O que **não** tem teste: conflito entre dispositivos e escrita durante um
+upload em andamento (DIAGNOSTICO S1 e S2), e a importação de planilha de
+**créditos** por arquivo.
 
 Para medir com dados reais sem tocar na nuvem: baixar o `dados.json` do
 bucket e carregá-lo num servidor de dev em modo local. Imprima só agregados —
