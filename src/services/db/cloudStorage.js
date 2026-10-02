@@ -9,22 +9,23 @@ import {
   getUserStorageObjectPath,
   isSupabaseConfigured,
   supabase,
-  supabaseAnonKey,
-  supabaseUrl,
 } from "../supabaseClient.js";
-import { exportSnapshotText, restoreDatabaseSnapshot } from "./backup.js";
+import { restoreDatabaseFromParts, restoreDatabaseSnapshot } from "./backup.js";
 import {
   initDB,
+  query,
+  queryPrepared,
   setOnAfterTransaction,
 } from "./connection.js";
 import { updateStorageInfo } from "./events.js";
 import { localizeHydrationError } from "./cloudSyncUtils.js";
 import {
-  fitsKeepaliveBudget,
   hasRemoteVersionChanged,
   hasUnsyncedRevision,
+  isAlreadyExistsError,
   isObjectNotFoundError,
   nextUploadRetryDelay,
+  pickServerVersion,
   pickSnapshotVersion,
   shouldFlushOnHide,
 } from "./cloudSyncDecisions.js";
@@ -32,25 +33,48 @@ import {
   compressSnapshot,
   readSnapshotBlob,
 } from "./snapshotCodec.js";
+import {
+  MANIFEST_OBJECT_NAME,
+  PARTS_FOLDER,
+  buildLegacyTombstoneText,
+  buildManifest,
+  buildPartExportQuery,
+  buildPartFileName,
+  buildPartFingerprintsQuery,
+  buildSourceColumnsQuery,
+  findMissingPartFiles,
+  fingerprintOf,
+  isPartitionedKey,
+  listCurrentParts,
+  parseManifest,
+  planPartUploads,
+  selectOrphanFiles,
+} from "./snapshotParts.js";
+import { SNAPSHOT_SOURCES } from "./snapshotSources.js";
 import { logError } from "../logger.js";
 
 /**
- * Cloud-backed persistence: every write triggers a debounced upload of the
- * full snapshot to Supabase Storage. On startup, after the user authenticates,
- * the latest snapshot is pulled down and replayed into the in-memory DuckDB.
+ * Persistência na nuvem: o banco vive em memória e é gravado no Supabase
+ * Storage, em PARTES, com um índice (ver `snapshotParts.js`).
  *
- * Why a single blob (not per-table writes)? The dataset is small (<2k rows
- * across all tables for the foreseeable future) and the existing
- * import/export JSON pipeline already handles serialization. Trading
- * granularity for code simplicity is the right call here.
+ * Fluxo:
+ *   - ao abrir (depois do login) → `hydrateFromCloud(userId)`: baixa o índice
+ *     e as partes e monta o banco;
+ *   - a cada gravação → `scheduleCloudFlush()` (espera ~2 s e junta as
+ *     gravações): sobe só as partes que mudaram e, por último, o índice;
+ *   - ao sair da aba → `flushPendingCloudSync()`.
  *
- * Flow:
- *   - boot (after auth) → `hydrateFromCloud(userId)` → download + restore
- *   - on every transaction end → `scheduleCloudFlush()` (debounced ~2s)
- *   - on tab close → `flushPendingCloudSync()` via `beforeunload`
+ * Até o commit 320 o banco era UM arquivo (`dados.json`), regravado inteiro
+ * a cada alteração. Uma conta que ainda está nesse formato é lida por ele e
+ * migrada no primeiro envio — ver `blockLegacyFile`.
  */
 
 const FLUSH_DEBOUNCE_MS = 2000;
+const DOWNLOAD_CONCURRENCY = 4;
+const UPLOAD_CONCURRENCY = 3;
+
+// Nome com que o arquivo único antigo é guardado na migração.
+const LEGACY_ARCHIVE_NAME = "dados-formato-antigo.json";
 
 let activeUserId = null;
 let pendingTimer = null;
@@ -67,8 +91,27 @@ let isUploading = false;
 let lastSyncedAt = null;
 let lastError = null;
 let status = "idle"; // idle | syncing | error | offline
-let lastKnownServerVersion = null; // Supabase `updated_at` of the snapshot we've seen
+// A versão do que está na nuvem que este navegador viu por último (a do
+// índice; ou a do arquivo antigo, numa conta que ainda não migrou).
+let lastKnownServerVersion = null;
 let remoteConflict = false;
+
+// O índice que descreve o que este navegador sabe estar na nuvem: o que foi
+// lido ao abrir ou o que ele mesmo gravou por último. É contra ele que se
+// decide quais partes subir. `null` = a conta ainda não tem índice.
+let knownManifest = null;
+// O arquivo único antigo existe na pasta do usuário? (lido na listagem)
+let legacyFileExists = false;
+// Há algo a enviar que não depende de gravação do usuário: migrar a conta
+// para o formato em partes, ou concluir o bloqueio do arquivo antigo.
+let uploadNeededAfterHydration = false;
+// As colunas que cada SELECT do snapshot exporta. Não mudam durante a sessão.
+let columnsByKeyCache = null;
+let orphanSweepDone = false;
+// O bloqueio do arquivo antigo é tentado uma vez por sessão: se a causa da
+// falha for permanente (permissão, por exemplo), insistir a cada envio só
+// encheria o histórico de erros.
+let legacyBlockAttempted = false;
 
 // Hydration is idempotent at the module level: concurrent callers (React
 // StrictMode runs effects twice in dev) share the same promise, and once
@@ -152,22 +195,77 @@ function notifyConflictListeners() {
   }
 }
 
-async function fetchServerVersion(userId) {
-  if (!isSupabaseConfigured || !userId) return null;
+// ── Caminhos e operações no armazenamento ────────────────────────────────
 
-  const { data, error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .list(userId, { limit: 100 });
+const storage = () => supabase.storage.from(STORAGE_BUCKET);
+const manifestPath = (userId) => `${userId}/${MANIFEST_OBJECT_NAME}`;
+const partPath = (userId, file) => `${userId}/${PARTS_FOLDER}/${file}`;
+
+/** Roda `worker` sobre `items`, no máximo `limit` de cada vez. */
+async function runWithConcurrency(items, limit, worker) {
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.max(1, Math.min(limit, items.length)) },
+    async () => {
+      while (next < items.length) {
+        const index = next;
+        next += 1;
+        await worker(items[index], index);
+      }
+    },
+  );
+  await Promise.all(runners);
+}
+
+/**
+ * A versão do que está na nuvem, e se o arquivo único antigo ainda existe.
+ * Uma listagem da pasta do usuário responde as duas coisas.
+ */
+async function fetchServerState(userId) {
+  if (!isSupabaseConfigured || !userId) {
+    return { version: null, legacyExists: false };
+  }
+
+  const { data, error } = await storage().list(userId, { limit: 100 });
 
   if (error) {
     throw error;
   }
 
-  return pickSnapshotVersion(data, STORAGE_OBJECT_NAME);
+  return {
+    version: pickServerVersion(data, {
+      manifestName: MANIFEST_OBJECT_NAME,
+      legacyName: STORAGE_OBJECT_NAME,
+    }),
+    legacyExists: Boolean(pickSnapshotVersion(data, STORAGE_OBJECT_NAME)),
+  };
+}
+
+async function fetchServerVersion(userId) {
+  const state = await fetchServerState(userId);
+  legacyFileExists = state.legacyExists;
+  return state.version;
+}
+
+/** O índice que está na nuvem; `null` se a conta ainda não tem um. */
+async function downloadManifest(userId) {
+  const { data, error } = await storage().download(manifestPath(userId));
+
+  if (error) {
+    // Índice ausente = conta que ainda não migrou (ou conta nova). Qualquer
+    // outra falha precisa subir: ler "sem índice" por engano faria o app
+    // abrir pelo arquivo antigo, ou vazio, e gravar isso por cima.
+    if (isObjectNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  }
+
+  return parseManifest(await readSnapshotBlob(data));
 }
 
 /**
- * Compares the server-side `updated_at` of the snapshot with what we last
+ * Compares the server-side version of the snapshot with what we last
  * uploaded/downloaded. If they don't match, another tab/device has written
  * to the bucket while this tab was idle.
  *
@@ -203,16 +301,20 @@ export async function checkForRemoteChanges() {
 // que descarta o trabalho local — o contrário do que o botão promete.
 //
 // Aceitar o conflito é exatamente declarar a versão remota como vista. Por
-// isso a âncora é atualizada ANTES do upload. Se outro dispositivo gravar de
-// novo nesse intervalo, a checagem do upload pega e o aviso reaparece — o
-// que é o comportamento certo.
+// isso a âncora é atualizada ANTES do upload — e o índice remoto passa a ser
+// o conhecido: é contra ELE que o envio decide o que subir e quais arquivos
+// do outro dispositivo saem de uso. Se outro dispositivo gravar de novo
+// nesse intervalo, a checagem do upload pega e o aviso reaparece — o que é
+// o comportamento certo.
 export async function acknowledgeRemoteConflict() {
   if (!remoteConflict) return;
 
   const userId = activeUserId;
   if (userId) {
     try {
+      const remoteManifest = await downloadManifest(userId);
       const serverVersion = await fetchServerVersion(userId);
+      knownManifest = remoteManifest;
       if (serverVersion) {
         lastKnownServerVersion = serverVersion;
       }
@@ -241,12 +343,23 @@ export function setActiveCloudUser(userId) {
     consecutiveUploadFailures = 0;
     localRevision = 0;
     uploadedRevision = 0;
+    knownManifest = null;
+    legacyFileExists = false;
+    uploadNeededAfterHydration = false;
+    orphanSweepDone = false;
+    legacyBlockAttempted = false;
     // Invalidate the hydration cache so a new account on the same tab
     // forces a fresh download instead of trusting whatever happens to be
     // sitting in DuckDB right now.
     if (previousUserId) {
       resetHydrationCache();
     }
+  } else if (uploadNeededAfterHydration) {
+    // A hidratação deixou trabalho que não espera uma gravação do usuário:
+    // levar a conta para o formato em partes, ou concluir o bloqueio do
+    // arquivo antigo.
+    uploadNeededAfterHydration = false;
+    scheduleCloudFlush();
   }
   notifyListeners();
 }
@@ -280,14 +393,13 @@ function scheduleUploadRetry() {
   }, delay);
 }
 
-export async function downloadSnapshotFromCloud(userId) {
-  if (!isSupabaseConfigured) return null;
-  if (!userId) return null;
-
+/**
+ * O arquivo único do formato antigo, para a conta que ainda não migrou.
+ * `null` se não existe (conta nova).
+ */
+async function downloadLegacySnapshot(userId) {
   const path = getUserStorageObjectPath(userId);
-  const { data, error } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .download(path);
+  const { data, error } = await storage().download(path);
 
   if (error) {
     // Object missing = first-time user; anything else must propagate. See
@@ -315,6 +427,49 @@ export async function downloadSnapshotFromCloud(userId) {
   }
 
   return normalizeSnapshotPayload(parsed);
+}
+
+/**
+ * Baixa os arquivos das partes de um índice. Devolve `Map(arquivo → Blob)`.
+ *
+ * Tudo é baixado ANTES de o banco ser tocado: uma falha de rede no meio não
+ * deixa nada pela metade. Os arquivos ficam comprimidos na memória (dezenas
+ * de MB no total) e cada um só é aberto na hora de entrar no banco.
+ */
+async function downloadParts(userId, manifest, { reuse, onProgress } = {}) {
+  const blobs = new Map();
+  // Parte sem linha nenhuma (tabela vazia) não tem o que carregar.
+  const files = Array.from(
+    new Set(
+      manifest.parts
+        .filter((part) => Number(part.rows ?? 0) > 0)
+        .map((part) => part.file),
+    ),
+  );
+  let done = 0;
+
+  await runWithConcurrency(files, DOWNLOAD_CONCURRENCY, async (file) => {
+    const cached = reuse?.get(file);
+    if (cached) {
+      blobs.set(file, cached);
+    } else {
+      const { data, error } = await storage().download(partPath(userId, file));
+      if (error) {
+        const failure = new Error(
+          "Não foi possível baixar uma parte dos dados da nuvem.",
+          { cause: error },
+        );
+        failure.isMissingPart = isObjectNotFoundError(error);
+        failure.partialBlobs = blobs;
+        throw failure;
+      }
+      blobs.set(file, data);
+    }
+    done += 1;
+    onProgress?.({ downloadedParts: done, totalParts: files.length });
+  });
+
+  return blobs;
 }
 
 async function uploadSnapshotImmediate(userId) {
@@ -345,11 +500,246 @@ async function uploadSnapshotImmediate(userId) {
   return performUpload(userId);
 }
 
+async function getColumnsByKey() {
+  if (!columnsByKeyCache) {
+    const columns = {};
+    for (const source of SNAPSHOT_SOURCES) {
+      const rows = await query(buildSourceColumnsQuery(source.key));
+      columns[source.key] = rows.map((row) => String(row.column_name));
+    }
+    columnsByKeyCache = columns;
+  }
+  return columnsByKeyCache;
+}
+
+/** As partes que o banco tem agora, com a impressão digital de cada uma. */
+async function readCurrentParts() {
+  const rowsByKey = {};
+  for (const source of SNAPSHOT_SOURCES) {
+    rowsByKey[source.key] = await query(buildPartFingerprintsQuery(source.key));
+  }
+  return listCurrentParts(rowsByKey);
+}
+
+async function uploadObject(path, blob, { contentType, cacheControl }) {
+  const { error } = await storage().upload(path, blob, {
+    upsert: true,
+    contentType,
+    cacheControl,
+  });
+  if (error) throw error;
+}
+
+async function uploadManifest(userId, manifest) {
+  await uploadObject(
+    manifestPath(userId),
+    new Blob([JSON.stringify(manifest)], { type: "application/json" }),
+    { contentType: "application/json", cacheControl: "0" },
+  );
+}
+
+/**
+ * Grava na nuvem o que mudou desde o índice conhecido.
+ *
+ * 1. Lê a impressão digital de cada parte (dentro do DuckDB, em outra thread).
+ * 2. Exporta e sobe só as partes cuja impressão mudou. Cada arquivo tem a
+ *    impressão no nome, então nunca sobrescreve um arquivo em uso.
+ * 3. Sobe o índice novo. É ESTE passo que troca o banco na nuvem — se
+ *    qualquer coisa falhar antes, o índice antigo continua valendo inteiro.
+ * 4. Apaga os arquivos que saíram de uso há mais tempo que o prazo de guarda.
+ *
+ * Devolve `true` se gravou um índice novo.
+ */
+async function uploadChangedParts(userId) {
+  const plan = planPartUploads(await readCurrentParts(), knownManifest);
+  const pending = plan.filter((part) => part.upload);
+
+  const nothingChanged =
+    knownManifest &&
+    pending.length === 0 &&
+    plan.length === knownManifest.parts.length;
+  if (nothingChanged) {
+    return false;
+  }
+
+  const columnsByKey = await getColumnsByKey();
+  const finalParts = plan.filter((part) => !part.upload);
+  const uploads = [];
+
+  // A exportação é uma de cada vez (o banco tem uma conexão só); o envio de
+  // cada arquivo corre em paralelo com a exportação do seguinte.
+  //
+  // Cada envio guarda a própria falha em vez de rejeitar: uma recusa pode
+  // chegar enquanto a parte seguinte está sendo exportada, e uma promessa
+  // rejeitada sem ninguém escutando vira erro não tratado — um registro no
+  // histórico por arquivo.
+  const inFlight = new Set();
+  const failures = [];
+
+  for (const part of pending) {
+    if (failures.length > 0) break;
+
+    const rows = await queryPrepared(
+      buildPartExportQuery(part.key),
+      isPartitionedKey(part.key) ? [part.partition] : [],
+    );
+    const exported = rows[0] ?? {};
+    const total = Number(exported.total ?? 0);
+
+    // A partição sumiu entre a leitura das impressões e a exportação (uma
+    // importação excluída, por exemplo): não há parte a gravar.
+    if (isPartitionedKey(part.key) && total === 0) {
+      continue;
+    }
+
+    // A impressão vem da MESMA consulta que gerou o JSON: o nome do arquivo
+    // e o índice descrevem o que de fato subiu.
+    const fingerprint = fingerprintOf(exported);
+    const file = buildPartFileName(part.key, part.partition, fingerprint);
+    const { blob, contentType } = await compressSnapshot(
+      String(exported.json_text ?? "[]"),
+    );
+
+    finalParts.push({ ...part, rows: total, fingerprint, file, bytes: blob.size });
+
+    // Conteúdo imutável (o nome muda quando o conteúdo muda): o navegador
+    // pode guardar em cache pelo tempo que quiser.
+    const upload = uploadObject(partPath(userId, file), blob, {
+      contentType,
+      cacheControl: "31536000",
+    })
+      .catch((error) => {
+        failures.push(error);
+      })
+      .finally(() => inFlight.delete(upload));
+    inFlight.add(upload);
+    uploads.push(upload);
+
+    if (inFlight.size >= UPLOAD_CONCURRENCY) {
+      await Promise.race(inFlight);
+    }
+  }
+
+  // Espera todos terminarem — dando certo ou não — antes de decidir. Sem o
+  // índice novo, nada do que subiu vale: o índice antigo continua inteiro.
+  await Promise.all(uploads);
+  if (failures.length > 0) {
+    throw failures[0];
+  }
+
+  const { manifest, filesToDelete } = buildManifest({
+    parts: finalParts,
+    columnsByKey,
+    previousManifest: knownManifest,
+    exportedAt: new Date().toISOString(),
+  });
+
+  await uploadManifest(userId, manifest);
+  knownManifest = manifest;
+
+  // Só depois do índice novo gravado. Falhar aqui não perde nada: o arquivo
+  // fica sobrando e a varredura de órfãos o recolhe mais tarde.
+  if (filesToDelete.length > 0) {
+    const { error } = await storage().remove(
+      filesToDelete.map((file) => partPath(userId, file)),
+    );
+    if (error) {
+      logError("cloudStorage.removeRetiredParts", error, {
+        files: filesToDelete.length,
+      });
+    }
+  }
+
+  return true;
+}
+
+async function listPartFiles(userId) {
+  const entries = [];
+  // O tamanho de página padrão do armazenamento. Pedir mais e receber menos
+  // por um teto do servidor encerraria a listagem cedo, sem aviso.
+  const pageSize = 100;
+
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await storage().list(`${userId}/${PARTS_FOLDER}`, {
+      limit: pageSize,
+      offset,
+    });
+    if (error) throw error;
+    entries.push(...(data ?? []));
+    if (!data || data.length < pageSize) break;
+  }
+
+  return entries;
+}
+
+/**
+ * Troca o arquivo único antigo por um aviso, guardando uma cópia dele.
+ *
+ * Um computador com uma versão anterior do sistema só conhece `dados.json`.
+ * Deixado como está, ele abriria com os dados do dia da migração e gravaria
+ * por cima deles — trabalho que nenhum outro computador veria. Com o aviso
+ * no lugar (que não é JSON), a versão antiga acusa erro ao abrir e não grava
+ * nada, até ser atualizada.
+ *
+ * Só roda DEPOIS de conferir que todas as partes do índice estão na nuvem
+ * com o tamanho certo: a partir daqui o formato novo é o único lugar onde os
+ * dados estão. A cópia é feita no servidor, sem baixar o arquivo.
+ */
+async function blockLegacyFile(userId) {
+  const missing = findMissingPartFiles(await listPartFiles(userId), knownManifest);
+  if (missing.length > 0) {
+    throw new Error(
+      `Migração: ${missing.length} parte(s) do índice não estão na nuvem; o arquivo antigo foi mantido.`,
+    );
+  }
+
+  const legacyPath = getUserStorageObjectPath(userId);
+  const { error: copyError } = await storage().copy(
+    legacyPath,
+    `${userId}/${LEGACY_ARCHIVE_NAME}`,
+  );
+  // "Já existe" = uma tentativa anterior fez a cópia e parou depois. A que
+  // vale é aquela: copiar de novo levaria o aviso por cima do arquivo.
+  if (copyError && !isAlreadyExistsError(copyError)) {
+    throw copyError;
+  }
+
+  const blockedAt = new Date().toISOString();
+  const legacy = { archivedAs: LEGACY_ARCHIVE_NAME, blockedAt };
+
+  // Mesmo tipo do índice, de propósito: se o armazenamento restringir tipos
+  // de arquivo, o índice já teria sido recusado antes de chegar aqui — e o
+  // aviso não corre o risco de ser o único recusado, deixando o arquivo
+  // antigo de pé. A versão antiga lê o texto sem olhar o tipo.
+  await uploadObject(
+    legacyPath,
+    new Blob([buildLegacyTombstoneText(legacy)], { type: "application/json" }),
+    { contentType: "application/json", cacheControl: "0" },
+  );
+
+  // O índice registra que o bloqueio foi feito, para nenhum computador
+  // tentar de novo.
+  const manifest = { ...knownManifest, legacy };
+  await uploadManifest(userId, manifest);
+  knownManifest = manifest;
+}
+
+/** Uma vez por sessão: apaga arquivos de parte que nenhum índice cita. */
+async function sweepOrphanParts(userId) {
+  const orphans = selectOrphanFiles(await listPartFiles(userId), knownManifest);
+  if (orphans.length === 0) return;
+
+  const { error } = await storage().remove(
+    orphans.map((file) => partPath(userId, file)),
+  );
+  if (error) throw error;
+}
+
 // The actual upload, without the conflict gate. Split out so
-// `flushBeforeUnload`'s fallback can skip straight to it — a `beforeunload`
-// handler has very little time budget, and spending part of it on a
+// `flushBeforeUnload` can skip straight to it — a `beforeunload` handler has
+// very little time budget, and spending part of it on a
 // `checkForRemoteChanges()` round-trip (network) would only shrink the
-// already-slim chance the fallback fetch lands before the page is gone.
+// already-slim chance the upload lands before the page is gone.
 async function performUpload(userId) {
   isUploading = true;
   status = "syncing";
@@ -357,34 +747,43 @@ async function performUpload(userId) {
   notifyListeners();
 
   pendingPromise = (async () => {
-    // Anotada ANTES de montar o snapshot: o que for gravado daqui em diante
-    // pode não estar nele, e precisa de outro envio.
+    // Anotada ANTES de ler o banco: o que for gravado daqui em diante pode
+    // não estar nas partes enviadas, e precisa de outro envio.
     const revisionAtSnapshot = localRevision;
 
     try {
-      // O texto vem pronto do DuckDB. Montá-lo em JavaScript travava a
-      // interface por meio segundo a cada gravação — ver `exportSnapshotText`.
-      const snapshot = await exportSnapshotText();
+      await uploadChangedParts(userId);
 
-      if (!snapshot) {
-        throw new Error("O banco de dados ainda não está disponível.");
-      }
-
-      const path = getUserStorageObjectPath(userId);
-      const { blob: body, contentType } = await compressSnapshot(snapshot.text);
-      const { error } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .upload(path, body, {
-          upsert: true,
-          contentType,
-          cacheControl: "0",
-        });
-      if (error) throw error;
       lastSyncedAt = new Date().toISOString();
       status = "idle";
       uploadedRevision = Math.max(uploadedRevision, revisionAtSnapshot);
       consecutiveUploadFailures = 0;
       cancelRetryTimer();
+
+      // O que vem depois é arrumação: os dados já estão na nuvem. Uma falha
+      // aqui é registrada e tentada de novo no próximo envio, sem marcar a
+      // sincronização como falha.
+      if (
+        legacyFileExists &&
+        knownManifest &&
+        !knownManifest.legacy &&
+        !legacyBlockAttempted
+      ) {
+        legacyBlockAttempted = true;
+        try {
+          await blockLegacyFile(userId);
+        } catch (blockError) {
+          logError("cloudStorage.blockLegacyFile", blockError);
+        }
+      }
+
+      if (!orphanSweepDone) {
+        orphanSweepDone = true;
+        sweepOrphanParts(userId).catch((sweepError) =>
+          logError("cloudStorage.sweepOrphanParts", sweepError),
+        );
+      }
+
       // Refresh our anchor of the server-side version so we won't trip the
       // conflict detector on our own upload. Best-effort — if the metadata
       // fetch fails, we just leave the previous anchor and accept the
@@ -411,9 +810,10 @@ async function performUpload(userId) {
     } finally {
       isUploading = false;
       pendingPromise = null;
-      // Houve gravação enquanto este envio estava no ar: ela não está no
-      // snapshot que acabou de subir. Só depois de um envio que DEU CERTO —
-      // quando falha, quem decide a próxima tentativa é o `scheduleUploadRetry`.
+      // Houve gravação enquanto este envio estava no ar: ela pode não estar
+      // nas partes que acabaram de subir. Só depois de um envio que DEU CERTO
+      // — quando falha, quem decide a próxima tentativa é o
+      // `scheduleUploadRetry`.
       if (
         status === "idle" &&
         !pendingTimer &&
@@ -428,72 +828,17 @@ async function performUpload(userId) {
   return pendingPromise;
 }
 
-// Best-effort delivery for the tab-close case. The Supabase storage-js SDK
-// (verified against the installed version) never sets `keepalive` on its
-// underlying fetch, so a normal `.upload()` call gets aborted the instant
-// the page unloads. This bypasses the SDK for just this one call and talks
-// to the Storage REST endpoint directly with `keepalive: true`, which lets
-// the browser finish the request after the page is gone — but only works
-// under the ~64KB body cap enforced by the browser itself (see
-// KEEPALIVE_BODY_LIMIT_BYTES). Mirrors the exact request shape the SDK uses
-// for `.upload(path, blob, { upsert: true })` (FormData with a `cacheControl`
-// field and the blob under an empty-string field name) so the server sees
-// an identical request.
-async function tryKeepaliveUpload(userId, blob) {
-  if (!supabaseUrl || !supabaseAnonKey) return false;
-  if (!fitsKeepaliveBudget(blob.size)) return false;
-
-  try {
-    const { data } = await supabase.auth.getSession();
-    const accessToken = data?.session?.access_token;
-    if (!accessToken) return false;
-
-    const path = getUserStorageObjectPath(userId);
-    const form = new FormData();
-    form.append("cacheControl", "0");
-    form.append("", blob);
-
-    const response = await fetch(
-      `${supabaseUrl}/storage/v1/object/${STORAGE_BUCKET}/${path}`,
-      {
-        method: "POST",
-        keepalive: true,
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          apikey: supabaseAnonKey,
-          "x-upsert": "true",
-        },
-        body: form,
-      },
-    );
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-// Used only from the `beforeunload` handler. Tries the keepalive-backed
-// path first; if the payload is too large for it (or anything about it
-// fails), falls back to the normal SDK upload, which the browser may still
-// abort mid-flight — that residual risk is exactly why `beforeunload` also
-// warns the user before this runs, instead of assuming this function makes
-// the loss impossible.
+// Used only from the `beforeunload` handler: a última tentativa, sem
+// garantia. O navegador pode cortar o envio quando a página fecha — por isso
+// o `beforeunload` também avisa o usuário antes, em vez de supor que esta
+// função torna a perda impossível. O trabalho de verdade é feito mais cedo,
+// em `visibilitychange`/`pagehide`, com a página ainda viva.
+//
+// Não checa conflito de propósito — ver o comentário de `performUpload`.
 async function flushBeforeUnload(userId) {
   if (!isSupabaseConfigured || !userId) return;
   cancelPendingTimer();
   cancelRetryTimer();
-  try {
-    const snapshot = await exportSnapshotText();
-    if (!snapshot) return;
-    const { blob } = await compressSnapshot(snapshot.text);
-    const delivered = await tryKeepaliveUpload(userId, blob);
-    if (delivered) return;
-  } catch (error) {
-    logError("cloudStorage.flushBeforeUnload", error);
-  }
-  // Skip the conflict gate here on purpose — see the comment on
-  // `performUpload`. Every millisecond spent checking is a millisecond not
-  // spent trying to get the user's own work saved before the tab closes.
   await performUpload(userId);
 }
 
@@ -529,6 +874,90 @@ export async function flushPendingCloudSync() {
   await uploadSnapshotImmediate(activeUserId);
 }
 
+/** Monta o banco a partir do índice e das partes baixadas. */
+async function restoreFromManifest(manifest, blobs, onProgress) {
+  const tables = SNAPSHOT_SOURCES.map((source) => ({
+    key: source.key,
+    columns: manifest.columns?.[source.key],
+    files: manifest.parts
+      .filter((part) => part.key === source.key)
+      .map((part) => ({
+        rowCount: Number(part.rows ?? 0),
+        loadText: () => readSnapshotBlob(blobs.get(part.file)),
+      })),
+  }));
+
+  await restoreDatabaseFromParts(tables, {
+    emitChange: false,
+    onProgress: (progress) => onProgress?.({ step: "restore", ...progress }),
+  });
+}
+
+/**
+ * Abre pelo formato em partes. Devolve `false` se a conta não tem índice.
+ *
+ * Se um arquivo citado pelo índice não existir mais — outro computador
+ * gravou enquanto este baixava, e o prazo de guarda passou —, o índice é
+ * lido de novo e o download recomeça, aproveitando o que já veio.
+ */
+async function hydrateFromParts(userId, onProgress) {
+  let manifest = await downloadManifest(userId);
+  if (!manifest) return false;
+
+  const report = (progress) => onProgress?.({ step: "download", ...progress });
+  let blobs;
+  try {
+    blobs = await downloadParts(userId, manifest, { onProgress: report });
+  } catch (error) {
+    if (!error?.isMissingPart) throw error;
+    manifest = await downloadManifest(userId);
+    if (!manifest) throw error;
+    blobs = await downloadParts(userId, manifest, {
+      reuse: error.partialBlobs,
+      onProgress: report,
+    });
+  }
+
+  onProgress?.("restore");
+  await restoreFromManifest(manifest, blobs, onProgress);
+  knownManifest = manifest;
+  // Índice sem o registro do bloqueio e arquivo antigo ainda na pasta: a
+  // migração parou antes do último passo. Um envio conclui.
+  uploadNeededAfterHydration = legacyFileExists && !manifest.legacy;
+
+  return { hadData: manifest.parts.some((part) => Number(part.rows) > 0) };
+}
+
+/** Abre pelo arquivo único antigo — conta que ainda não migrou, ou nova. */
+async function hydrateFromLegacyFile(userId, onProgress) {
+  const snapshot = await downloadLegacySnapshot(userId);
+
+  // Always replay the remote snapshot — even when it's empty — so
+  // DuckDB ends up matching the cloud exactly. If we skip this for
+  // first-time users, stale rows from a previous session (e.g., a
+  // different account signing in on the same browser) would leak
+  // into the next upload.
+  onProgress?.("restore");
+  await restoreDatabaseSnapshot(snapshot ?? createEmptySnapshot(), {
+    allowEmpty: true,
+    emitChange: false,
+    // Forward per-table progress to the same callback so the
+    // CloudSyncGate can show "Restaurando donation_notes (8.500 /
+    // 30.000)" instead of a flat "Restaurando…". String key keeps
+    // the public API back-compatible for callers that only care
+    // about the phase.
+    onProgress: (progress) => onProgress?.({ step: "restore", ...progress }),
+  });
+
+  knownManifest = null;
+  const hadData = Boolean(snapshot && snapshotHasData(snapshot));
+  // Conta com dados no formato antigo: o primeiro envio leva tudo para o
+  // formato em partes, sem esperar uma gravação do usuário.
+  uploadNeededAfterHydration = hadData;
+
+  return { hadData };
+}
+
 export async function hydrateFromCloud(userId, { onProgress } = {}) {
   if (!isSupabaseConfigured) {
     return { hydrated: false, hadData: false };
@@ -555,7 +984,10 @@ export async function hydrateFromCloud(userId, { onProgress } = {}) {
       onProgress?.("db");
       await initDB();
       onProgress?.("download");
-      const snapshot = await downloadSnapshotFromCloud(userId);
+
+      // A versão é lida ANTES do conteúdo: se outro computador gravar no
+      // meio do download, a âncora fica mais antiga que o que foi baixado e
+      // a primeira checagem acusa o conflito — o erro para o lado seguro.
       try {
         lastKnownServerVersion = await fetchServerVersion(userId);
       } catch (versionError) {
@@ -563,28 +995,11 @@ export async function hydrateFromCloud(userId, { onProgress } = {}) {
         lastKnownServerVersion = null;
       }
 
-      // Always replay the remote snapshot — even when it's empty — so
-      // DuckDB ends up matching the cloud exactly. If we skip this for
-      // first-time users, stale rows from a previous session (e.g., a
-      // different account signing in on the same browser) would leak
-      // into the next upload.
-      onProgress?.("restore");
-      const effectiveSnapshot = snapshot ?? createEmptySnapshot();
-      await restoreDatabaseSnapshot(effectiveSnapshot, {
-        allowEmpty: true,
-        emitChange: false,
-        // Forward per-table progress to the same callback so the
-        // CloudSyncGate can show "Restaurando donation_notes (8.500 /
-        // 30.000)" instead of a flat "Restaurando…". String key keeps
-        // the public API back-compatible for callers that only care
-        // about the phase.
-        onProgress: (progress) =>
-          onProgress?.({ step: "restore", ...progress }),
-      });
-      return {
-        hydrated: true,
-        hadData: Boolean(snapshot && snapshotHasData(snapshot)),
-      };
+      const result =
+        (await hydrateFromParts(userId, onProgress)) ||
+        (await hydrateFromLegacyFile(userId, onProgress));
+
+      return { hydrated: true, hadData: result.hadData };
     } catch (error) {
       // Reset so a retry actually runs again.
       hydratedUserId = null;
@@ -625,11 +1040,9 @@ export function hasPendingCloudWork() {
 
 // Flush while the page is still alive. `visibilitychange → hidden` and
 // `pagehide` both fire BEFORE the browser starts tearing the page down, so a
-// normal (unrestricted) upload works here — unlike `beforeunload`, whose
-// keepalive path caps the body at ~60KB, a threshold the compressed snapshot
-// crosses after roughly two months of real use. Covers the cases that
-// actually dominate in practice: switching tabs, switching apps, and mobile
-// backgrounding (where `beforeunload` often never fires at all).
+// normal upload works here. Covers the cases that actually dominate in
+// practice: switching tabs, switching apps, and mobile backgrounding (where
+// `beforeunload` often never fires at all).
 function flushIfPending(scope) {
   const shouldFlush = shouldFlushOnHide({
     isConfigured: isSupabaseConfigured,
@@ -642,10 +1055,10 @@ function flushIfPending(scope) {
 
 // Flush on tab close so the user doesn't lose changes that were sitting in
 // the debounce window. Layered, because no single hook is reliable:
-//   1. `visibilitychange`/`pagehide` above — the page is still alive, so the
-//      upload has no size limit. This is the one that does the real work.
-//   2. `flushBeforeUnload` tries a keepalive-backed request that can survive
-//      the page actually closing (see its comment for the size caveat).
+//   1. `visibilitychange`/`pagehide` above — the page is still alive. This is
+//      the one that does the real work.
+//   2. `flushBeforeUnload` starts one last upload, which the browser may or
+//      may not let finish.
 //   3. The native "leave site?" prompt gives the user an actual choice to
 //      stay and let the sync finish, instead of silently losing work when
 //      neither of the above completes in time.

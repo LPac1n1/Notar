@@ -4,14 +4,9 @@
  * carrega em Node).
  *
  * O que mora aqui são justamente os pontos em que errar custa DADO:
- * classificar um erro de download como "primeiro uso", decidir se outro
- * dispositivo escreveu, e decidir se o corpo cabe no envio que sobrevive ao
- * fechamento da aba. Todos são testáveis sem rede.
+ * classificar um erro de download como "primeiro uso" e decidir se outro
+ * dispositivo escreveu. Todos são testáveis sem rede.
  */
-
-// Navegadores limitam o corpo de `fetch(..., { keepalive: true })` em ~64KB.
-// Ficamos abaixo com folga para o pedido não ser descartado pelo navegador.
-export const KEEPALIVE_BODY_LIMIT_BYTES = 60_000;
 
 // Assinatura gzip (RFC 1952). Snapshots antigos, gravados antes da
 // compressão, são JSON puro — a detecção por magic bytes é o que mantém a
@@ -58,13 +53,25 @@ export function hasRemoteVersionChanged(knownVersion, remoteVersion) {
 }
 
 /**
- * O corpo cabe no envio com `keepalive` (o único que pode ser concluído
- * depois que a página fecha)?
+ * O destino de uma cópia já existe? (HTTP 409 no armazenamento.)
+ *
+ * Usado ao guardar a cópia do arquivo antigo na migração: uma tentativa
+ * anterior pode ter feito a cópia e falhado no passo seguinte. Nesse caso a
+ * cópia que vale é a PRIMEIRA — refazê-la agora copiaria o aviso que já está
+ * no lugar do arquivo, por cima do arquivo de verdade.
  */
-export function fitsKeepaliveBudget(byteSize) {
-  const size = Number(byteSize);
-  if (!Number.isFinite(size) || size < 0) return false;
-  return size <= KEEPALIVE_BODY_LIMIT_BYTES;
+export function isAlreadyExistsError(error) {
+  if (!error) return false;
+
+  const status = Number(error.status ?? error.statusCode ?? 0);
+  if (status === 409) return true;
+
+  const message = String(error.message ?? "").toLowerCase();
+  return (
+    message.includes("already exists") ||
+    message.includes("duplicate") ||
+    String(error.statusCode ?? "") === "409"
+  );
 }
 
 /**
@@ -117,6 +124,22 @@ export function nextUploadRetryDelay(consecutiveFailures) {
   const failures = Number(consecutiveFailures);
   if (!Number.isInteger(failures) || failures < 1) return null;
   return UPLOAD_RETRY_DELAYS_MS[failures - 1] ?? null;
+}
+
+/**
+ * A versão do que está na nuvem, a partir da listagem da pasta do usuário.
+ *
+ * Com o formato em partes, quem diz qual é o banco é o ÍNDICE — a versão é a
+ * dele. Sem índice, vale a do arquivo único antigo (conta que ainda não
+ * migrou). O prefixo distingue os dois: sair do arquivo antigo para o índice
+ * é uma mudança de versão, e precisa ser vista como tal.
+ */
+export function pickServerVersion(entries, { manifestName, legacyName }) {
+  const manifestVersion = pickSnapshotVersion(entries, manifestName);
+  if (manifestVersion) return `manifest:${manifestVersion}`;
+
+  const legacyVersion = pickSnapshotVersion(entries, legacyName);
+  return legacyVersion ? `legacy:${legacyVersion}` : null;
 }
 
 /**

@@ -48,6 +48,12 @@ function formatProgressDescription(step) {
     return "Refazendo a conciliação de créditos…";
   }
 
+  // O banco chega em vários arquivos: mostrar quantos já vieram evita a
+  // impressão de tela parada numa conexão lenta.
+  if (step.step === "download" && step.totalParts) {
+    return `Baixando seus dados da nuvem (${step.downloadedParts ?? 0} de ${step.totalParts} arquivos)…`;
+  }
+
   if (step.step !== "restore" || !step.totalRows) {
     return baseLabel;
   }

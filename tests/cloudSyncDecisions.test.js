@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  KEEPALIVE_BODY_LIMIT_BYTES,
   UPLOAD_RETRY_DELAYS_MS,
-  fitsKeepaliveBudget,
   hasRemoteVersionChanged,
+  isAlreadyExistsError,
   isObjectNotFoundError,
   nextUploadRetryDelay,
+  pickServerVersion,
   pickSnapshotVersion,
   shouldFlushOnHide,
 } from "../src/services/db/cloudSyncDecisions.js";
@@ -71,20 +71,49 @@ test("conflict is exactly a version mismatch", () => {
   assert.equal(hasRemoteVersionChanged(known, "2026-08-01T10:05:00Z"), true);
 });
 
-test("keepalive budget rejects payloads the browser would drop", () => {
-  assert.equal(fitsKeepaliveBudget(0), true);
-  assert.equal(fitsKeepaliveBudget(KEEPALIVE_BODY_LIMIT_BYTES), true);
-  assert.equal(fitsKeepaliveBudget(KEEPALIVE_BODY_LIMIT_BYTES + 1), false);
+test("a versão da nuvem é a do índice; sem índice, a do arquivo antigo", () => {
+  const names = { manifestName: "manifest.json", legacyName: "dados.json" };
+  const legacy = { name: "dados.json", updated_at: "2026-09-27T10:00:00Z" };
+  const manifest = { name: "manifest.json", updated_at: "2026-10-02T18:00:00Z" };
 
-  // Um snapshot comprimido de alguns meses de uso já passa do limite; o
-  // caminho de keepalive precisa recusar em vez de emitir um pedido que o
-  // navegador descarta em silêncio.
-  assert.equal(fitsKeepaliveBudget(350_000), false);
+  assert.equal(pickServerVersion([], names), null);
+  assert.equal(pickServerVersion([legacy], names), "legacy:2026-09-27T10:00:00Z");
+  // Com os dois presentes vale o índice: o arquivo antigo é só o aviso que
+  // ficou no lugar.
+  assert.equal(
+    pickServerVersion([legacy, manifest, { name: "parts" }], names),
+    "manifest:2026-10-02T18:00:00Z",
+  );
 
-  // Entradas inválidas nunca podem "passar" por acidente.
-  assert.equal(fitsKeepaliveBudget(Number.NaN), false);
-  assert.equal(fitsKeepaliveBudget(-1), false);
-  assert.equal(fitsKeepaliveBudget(undefined), false);
+  // Migrar é mudar de versão — quem conhecia só o arquivo antigo precisa
+  // perceber que o banco passou a ser outro.
+  assert.equal(
+    hasRemoteVersionChanged(
+      pickServerVersion([legacy], names),
+      pickServerVersion([legacy, manifest], names),
+    ),
+    true,
+  );
+});
+
+test("cópia cujo destino já existe é reconhecida, e só ela", () => {
+  assert.equal(isAlreadyExistsError({ status: 409 }), true);
+  assert.equal(isAlreadyExistsError({ statusCode: "409" }), true);
+  assert.equal(isAlreadyExistsError({ message: "The resource already exists" }), true);
+  assert.equal(isAlreadyExistsError({ message: "Duplicate" }), true);
+
+  // Qualquer outra falha na cópia NÃO pode ser lida como "já copiado": o
+  // passo seguinte troca o arquivo antigo pelo aviso.
+  for (const error of [
+    null,
+    {},
+    { status: 400, message: "Object not found" },
+    { status: 403, message: "new row violates row-level security policy" },
+    { status: 500, message: "Internal Server Error" },
+    { message: "Failed to fetch" },
+  ]) {
+    assert.equal(isAlreadyExistsError(error), false, JSON.stringify(error));
+  }
 });
 
 test("hide-time flush requires configuration, a user and pending work", () => {

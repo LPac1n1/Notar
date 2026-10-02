@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 import {
   CLOUD_APP_URL,
+  FAKE_USER_ID,
+  LEGACY_ARCHIVE_PATH,
   signInWithFakeSession,
   startFakeStorage,
 } from "./helpers/fakeStorage.js";
@@ -16,11 +18,17 @@ import {
  * hidratar ao abrir, enviar depois de gravar — e o teste lê o que de fato
  * chegou "à nuvem".
  *
+ * O banco é gravado em PARTES com um índice: um envio são vários uploads e,
+ * por último, o do índice. É a gravação do índice que conta como "subiu".
+ *
  * Os testes dividem um servidor de storage numa porta fixa, por isso rodam
  * em série e todos neste arquivo.
  */
 test.describe.configure({ mode: "serial" });
 test.use({ baseURL: CLOUD_APP_URL });
+
+const LEGACY_PATH = `${FAKE_USER_ID}/dados.json`;
+const MANIFEST_PATH = `${FAKE_USER_ID}/manifest.json`;
 
 let storage;
 
@@ -46,34 +54,11 @@ async function addDemand(page, name) {
   await expect(page.getByText(name.toUpperCase())).toBeVisible();
 }
 
-test("o que é gravado sobe para a nuvem e volta ao recarregar", async ({
-  page,
-}) => {
-  await page.goto("/p/demandas-de-moradia");
-  await addDemand(page, "Demanda sincronizada");
+const storedDemandNames = () =>
+  (storage.readStoredSnapshot()?.data.demands ?? []).map((demand) => demand.name);
 
-  // O envio acontece sozinho, 2 s depois da gravação.
-  await expect
-    .poll(() => storage.acceptedUploads, { timeout: 30_000 })
-    .toBeGreaterThan(0);
-
-  const snapshot = storage.readStoredSnapshot();
-  expect(snapshot.data.demands.map((demand) => demand.name)).toContain(
-    "DEMANDA SINCRONIZADA",
-  );
-  // A conciliação é derivada das notas: não viaja no arquivo.
-  expect(Object.keys(snapshot.data)).not.toContain("creditReconciliation");
-
-  // Recarregar zera o banco em memória; o que aparece depois veio da nuvem.
-  await page.reload();
-  await expect(page.getByText("DEMANDA SINCRONIZADA")).toBeVisible({
-    timeout: 60_000,
-  });
-});
-
-test("arquivo antigo: a conciliação gravada é ignorada e refeita ao abrir", async ({
-  page,
-}) => {
+/** Como outro dispositivo teria deixado a conta, no formato de arquivo único. */
+function buildLegacySeed() {
   const fixture = JSON.parse(
     fs.readFileSync(
       fileURLToPath(
@@ -84,14 +69,15 @@ test("arquivo antigo: a conciliação gravada é ignorada e refeita ao abrir", a
   );
   const data = fixture.data ?? fixture;
 
-  // Como outro dispositivo teria deixado na nuvem antes desta mudança: a
-  // tabela vem gravada — aqui com TODAS as notas marcadas como sem par. Se
-  // o app restaurasse essas linhas, o projeto abriria sem crédito nenhum.
-  storage.seed({
+  return {
     version: 1,
     exportedAt: new Date().toISOString(),
     data: {
       ...data,
+      // Arquivo anterior à mudança que tirou a conciliação do snapshot: a
+      // tabela vem gravada — aqui com TODAS as notas marcadas como sem par.
+      // Se o app restaurasse essas linhas, o projeto abriria sem crédito
+      // nenhum.
       creditReconciliation: data.creditNotes.map((note, index) => ({
         id: `gravada-${index}`,
         credit_note_id: note.id,
@@ -100,18 +86,174 @@ test("arquivo antigo: a conciliação gravada é ignorada e refeita ao abrir", a
         created_at: "2026-01-01 00:00:00",
       })),
     },
+  };
+}
+
+const accumulatedCredit = (page) =>
+  page.getByText("Crédito acumulado").locator("xpath=..");
+
+test("o que é gravado sobe para a nuvem e volta ao recarregar", async ({
+  page,
+}) => {
+  await page.goto("/p/demandas-de-moradia");
+  await addDemand(page, "Demanda sincronizada");
+
+  // O envio acontece sozinho, 2 s depois da gravação.
+  await expect
+    .poll(() => storage.manifestUploads, { timeout: 30_000 })
+    .toBeGreaterThan(0);
+
+  const snapshot = storage.readStoredSnapshot();
+  expect(snapshot.data.demands.map((demand) => demand.name)).toContain(
+    "DEMANDA SINCRONIZADA",
+  );
+  // A conciliação é derivada das notas: não viaja.
+  expect(Object.keys(snapshot.data)).not.toContain("creditReconciliation");
+  // Conta que já nasce no formato novo: o arquivo único nunca é criado.
+  expect(storage.listPaths()).not.toContain(LEGACY_PATH);
+
+  // Recarregar zera o banco em memória; o que aparece depois veio da nuvem.
+  await page.reload();
+  await expect(page.getByText("DEMANDA SINCRONIZADA")).toBeVisible({
+    timeout: 60_000,
   });
+});
+
+test("conta no formato antigo migra ao abrir: nada se perde e o arquivo velho é bloqueado", async ({
+  page,
+}) => {
+  const seed = buildLegacySeed();
+  storage.seed(seed);
+  const legacyText = storage.readText(LEGACY_PATH);
 
   await page.goto("/p/capoeira");
 
   // Mesmo número que `project-credit-dashboard.spec.js` confere depois de
-  // importar esta fixture: a soma dos 10 créditos, todos conciliados.
-  const accumulated = page.getByText("Crédito acumulado").locator("xpath=..");
-  await expect(accumulated.getByText("R$ 1.385,00")).toBeVisible({
+  // importar esta fixture: a soma dos 10 créditos, todos conciliados — a
+  // conciliação gravada no arquivo antigo foi ignorada e refeita.
+  await expect(accumulatedCredit(page).getByText("R$ 1.385,00")).toBeVisible({
     timeout: 60_000,
   });
 
-  // Abrir não é gravar: nada pode ter subido.
+  // A migração acontece sozinha, sem esperar o usuário gravar nada, e
+  // termina com o registro do bloqueio no índice.
+  await expect
+    .poll(() => storage.readManifest()?.legacy?.archivedAs ?? null, {
+      timeout: 60_000,
+    })
+    .toBe("dados-formato-antigo.json");
+
+  // 1. O arquivo antigo foi guardado byte a byte.
+  expect(storage.readText(LEGACY_ARCHIVE_PATH)).toBe(legacyText);
+
+  // 2. No lugar dele ficou um aviso que NÃO é JSON nem está vazio: é o que
+  //    faz uma versão antiga do sistema acusar erro ao abrir, em vez de
+  //    abrir com dados velhos (ou vazia) e gravar por cima.
+  const tombstone = storage.readText(LEGACY_PATH);
+  expect(tombstone.trim()).not.toBe("");
+  expect(() => JSON.parse(tombstone)).toThrow();
+  expect(tombstone).toContain("dados-formato-antigo.json");
+
+  // 3. O que está no formato novo é o que estava no arquivo antigo, tabela
+  //    por tabela (a conciliação, derivada, não viaja).
+  const stored = storage.readStoredSnapshot().data;
+  for (const key of [
+    "projects",
+    "donors",
+    "donorCpfLinks",
+    "imports",
+    "donationNotes",
+    "creditImports",
+    "creditNotes",
+  ]) {
+    expect(
+      (stored[key] ?? []).map((row) => row.id).sort(),
+      `tabela ${key}`,
+    ).toEqual(seed.data[key].map((row) => row.id).sort());
+  }
+  expect(Object.keys(stored)).not.toContain("creditReconciliation");
+
+  // 4. As notas viraram uma parte por importação.
+  const manifest = storage.readManifest();
+  const noteParts = manifest.parts.filter((part) => part.key === "donationNotes");
+  expect(noteParts.length).toBe(
+    new Set(seed.data.donationNotes.map((note) => note.import_id)).size,
+  );
+
+  // Reabrir já é pelo formato novo — e abrir não é gravar: nada sobe.
+  const uploadsBeforeReload = storage.attempts.length;
+  await page.reload();
+  await expect(accumulatedCredit(page).getByText("R$ 1.385,00")).toBeVisible({
+    timeout: 60_000,
+  });
+  await page.waitForTimeout(5_000);
+  expect(storage.attempts.length).toBe(uploadsBeforeReload);
+});
+
+test("depois de migrada, uma alteração sobe só as partes que mudaram", async ({
+  page,
+}) => {
+  storage.seed(buildLegacySeed());
+  await page.goto("/p/demandas-de-moradia");
+  await expect
+    .poll(() => storage.readManifest()?.legacy?.archivedAs ?? null, {
+      timeout: 90_000,
+    })
+    .toBe("dados-formato-antigo.json");
+
+  const manifestBefore = storage.readManifest();
+  const uploadsBefore = storage.uploadedPaths.length;
+  const manifestsBefore = storage.manifestUploads;
+  const fileOf = (manifest, id) =>
+    manifest.parts.find((part) => part.id === id)?.file;
+
+  await addDemand(page, "Demanda nova");
+
+  await expect
+    .poll(() => storage.manifestUploads, { timeout: 30_000 })
+    .toBeGreaterThan(manifestsBefore);
+  await expect.poll(storedDemandNames, { timeout: 30_000 }).toContain("DEMANDA NOVA");
+
+  // As notas — quase todo o volume do banco — NÃO subiram de novo.
+  const newUploads = storage.uploadedPaths.slice(uploadsBefore);
+  expect(newUploads.some((path) => path.includes("/parts/demands."))).toBe(true);
+  expect(
+    newUploads.filter((path) => /\/parts\/(donationNotes|creditNotes)\./.test(path)),
+  ).toEqual([]);
+
+  // E continuam sendo os MESMOS arquivos no índice novo.
+  const manifestAfter = storage.readManifest();
+  for (const part of manifestBefore.parts.filter((item) =>
+    ["donationNotes", "creditNotes"].includes(item.key),
+  )) {
+    expect(fileOf(manifestAfter, part.id)).toBe(part.file);
+  }
+
+  // O arquivo antigo das demandas saiu do índice mas continua guardado: quem
+  // começou a abrir o sistema pelo índice anterior ainda vai baixá-lo.
+  const oldDemandsFile = fileOf(manifestBefore, "demands");
+  expect(fileOf(manifestAfter, "demands")).not.toBe(oldDemandsFile);
+  expect(manifestAfter.retired.map((entry) => entry.file)).toContain(oldDemandsFile);
+  expect(storage.listPaths()).toContain(`${FAKE_USER_ID}/parts/${oldDemandsFile}`);
+  expect(storage.removals).toEqual([]);
+});
+
+test("índice gravado por uma versão mais nova do sistema não é aberto nem sobrescrito", async ({
+  page,
+}) => {
+  storage.putObject(
+    MANIFEST_PATH,
+    JSON.stringify({ format: "notar-snapshot", version: 99, parts: [] }),
+  );
+
+  await page.goto("/p/demandas-de-moradia");
+
+  // Abrir assim mesmo perderia o que esta versão não entende, na primeira
+  // gravação. O sistema para e diz o que fazer.
+  await expect(
+    page.getByText(/gravados por uma versão mais nova do sistema/),
+  ).toBeVisible({ timeout: 60_000 });
+  await page.waitForTimeout(4_000);
   expect(storage.attempts).toHaveLength(0);
 });
 
@@ -131,40 +273,36 @@ test("uma falha de upload não entra em laço, e a nova tentativa entrega", asyn
   // UMA alteração, e depois ninguém mexe em nada por 12 s.
   //
   // Antes da correção o registro do erro contava como alteração e agendava
-  // outro upload: cabiam cinco ou seis tentativas nesse intervalo (uma a
-  // cada ~2 s), cada uma exportando o banco inteiro. Com espera crescente
-  // cabem duas — a original e a primeira nova tentativa, 5 s depois.
+  // outro envio: cabiam cinco ou seis nesse intervalo (um a cada ~2 s). Com
+  // espera crescente cabem dois — o original e a primeira nova tentativa,
+  // 5 s depois.
   await page.waitForTimeout(12_000);
-  expect(storage.attempts.length).toBeLessThanOrEqual(3);
-  expect(storage.acceptedUploads).toBe(0);
+  expect(storage.uploadBursts).toBeLessThanOrEqual(3);
+  expect(storage.manifestUploads).toBe(0);
 
   // O armazenamento volta a aceitar: a alteração tem de chegar sozinha, sem
   // o usuário precisar mexer em mais nada.
   storage.acceptUploads();
   await expect
-    .poll(() => storage.acceptedUploads, { timeout: 45_000 })
+    .poll(() => storage.manifestUploads, { timeout: 45_000 })
     .toBeGreaterThan(0);
-  expect(
-    storage.readStoredSnapshot().data.demands.map((demand) => demand.name),
-  ).toContain("DEMANDA TEIMOSA");
+  expect(storedDemandNames()).toContain("DEMANDA TEIMOSA");
 });
-
-const storedDemandNames = () =>
-  (storage.readStoredSnapshot()?.data.demands ?? []).map((demand) => demand.name);
 
 test("o que é gravado durante um envio em andamento também sobe", async ({
   page,
 }) => {
-  // O servidor demora 6 s para concluir cada upload: tempo de sobra para o
-  // usuário gravar outra coisa enquanto o primeiro envio ainda está no ar.
-  storage.delayUploads(6_000);
+  // O servidor demora 6 s para concluir a gravação do índice: tempo de sobra
+  // para o usuário gravar outra coisa com o primeiro envio ainda no ar.
+  storage.delayUploads(6_000, { onlyManifest: true });
 
   await page.goto("/p/demandas-de-moradia");
   await addDemand(page, "Primeira demanda");
 
-  // O primeiro envio saiu — com um snapshot montado ANTES da segunda demanda.
+  // O primeiro envio chegou ao índice — com as partes exportadas ANTES da
+  // segunda demanda.
   await expect
-    .poll(() => storage.attempts.length, { timeout: 30_000 })
+    .poll(() => storage.manifestAttempts, { timeout: 30_000 })
     .toBe(1);
 
   await page.getByRole("button", { name: "Adicionar demanda" }).click();
@@ -187,7 +325,7 @@ test("\"Manter minhas alterações\" sobe o que está aqui por cima do outro dis
   await page.goto("/p/demandas-de-moradia");
   await addDemand(page, "Demanda inicial");
   await expect
-    .poll(() => storage.acceptedUploads, { timeout: 30_000 })
+    .poll(() => storage.manifestUploads, { timeout: 30_000 })
     .toBe(1);
 
   // Outro dispositivo grava na nuvem. A próxima gravação daqui esbarra nisso.
@@ -204,7 +342,7 @@ test("\"Manter minhas alterações\" sobe o que está aqui por cima do outro dis
   });
   await expect(banner).toBeVisible({ timeout: 30_000 });
   // Enquanto o aviso está na tela, nada sobe.
-  expect(storage.acceptedUploads).toBe(1);
+  expect(storage.manifestUploads).toBe(1);
 
   await banner.getByRole("button", { name: "Manter minhas alterações" }).click();
 
