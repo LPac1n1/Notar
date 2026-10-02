@@ -40,8 +40,9 @@ import {
  */
 async function seedAssignments(conn, donorIds) {
   // Garante que o doador EXISTE. Várias fixtures inserem só o resumo mensal,
-  // e as consultas de apuração passaram a exigir doador ativo
-  // (`summaryDonorIsActive`): resumo de quem não está no cadastro não conta.
+  // e as consultas de apuração passaram a exigir que o doador exista e que
+  // as doações dele contem no mês (`summaryDonorCounts`): resumo de quem não
+  // está no cadastro não conta.
   // No sistema real essa linha não existe — excluir o doador leva o resumo
   // junto —, então a fixture precisa refletir isso. Quem já inseriu o próprio
   // doador não é tocado.

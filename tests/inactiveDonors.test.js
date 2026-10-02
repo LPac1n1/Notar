@@ -19,14 +19,23 @@ import {
   buildPendingAbatementSheetSql,
 } from "../src/services/monthly/abatementSheetSql.js";
 import { RECONCILE_MATCHED_DONORS_SQL } from "../src/services/import/reconcileSql.js";
+import {
+  donorCountsAtMonth,
+  donorCountsAtMonthValue,
+} from "../src/services/monthly/summaryScopeSql.js";
 
 /**
- * Doador inativo não entra na apuração — e volta inteiro ao ser reativado.
+ * Doador desativado sai da apuração DO MÊS DA DESATIVAÇÃO EM DIANTE — os
+ * meses anteriores continuam contando — e volta inteiro ao ser reativado.
  *
  * A lista da Gestão Mensal sempre escondeu o doador inativo. As outras telas
  * não: ele sumia da lista e continuava no painel, na evolução mensal, no
  * ranking e na planilha que vai para o sistema de baixa. Cada teste abaixo é
- * uma dessas saídas, conferida nos dois estados.
+ * uma dessas saídas.
+ *
+ * A fixture desativa o doador a partir de ABRIL, o primeiro mês dela: ele
+ * fica fora dos dois meses. Os testes do fim movem a desativação para MAIO
+ * e conferem que abril volta a contar.
  *
  * "Reativar" aqui é só virar `is_active`: nada é apagado quando o doador é
  * desativado, então não há o que reconstruir — é isso que os testes provam.
@@ -67,6 +76,11 @@ async function seed(conn) {
     `);
   }
 
+  await conn.query(`
+    INSERT INTO donor_activity_history (id, donor_id, event_type, reference_month)
+    VALUES ('evt-inativo', '${INATIVO.id}', 'deactivated', DATE '${APRIL}')
+  `);
+
   // Maio: o ativo com 3 notas, o inativo com 9 — as duas linhas pendentes.
   // Abril: só o inativo, 2 notas, JÁ ABATIDO.
   const summaries = [
@@ -106,6 +120,14 @@ async function run(conn, sql, params = []) {
 
 const reactivate = (conn) =>
   conn.query(`UPDATE donors SET is_active = TRUE WHERE id = '${INATIVO.id}'`);
+
+// "Inativo a partir de maio": abril, em que ele doou como ativo, conta.
+const deactivateFromMay = (conn) =>
+  conn.query(`
+    UPDATE donor_activity_history
+    SET reference_month = DATE '${MAY}'
+    WHERE id = 'evt-inativo'
+  `);
 
 async function withSeededDatabase(callback) {
   const conn = await createTestConnection();
@@ -241,4 +263,162 @@ test("CPF desvinculado continua fora do resumo, com o doador ativo ou não", asy
     const rows = await run(conn, RECONCILE_MATCHED_DONORS_SQL, ["imp-may"]);
     assert.deepEqual(rows.map((row) => row.donor_id), [INATIVO.id]);
   });
+});
+
+test("painel: o mês anterior à desativação continua contando o doador", async () => {
+  await withSeededDatabase(async (conn) => {
+    await deactivateFromMay(conn);
+
+    // Abril: ele doou como ativo, 2 notas, já abatidas.
+    const [april] = await run(conn, buildMonthBlockSummarySql(MORADIA), ["imp-apr"]);
+    assert.equal(Number(april.donor_count), 1);
+    assert.equal(Number(april.total_notes), 2);
+    assert.equal(Number(april.total_abatement), 2);
+    assert.equal(Number(april.applied_count), 1);
+    assert.equal(Number(april.pending_count), 0);
+
+    // Maio: o mês da desativação já fica de fora.
+    const [may] = await run(conn, buildMonthBlockSummarySql(MORADIA), ["imp-may"]);
+    assert.equal(Number(may.donor_count), 1);
+    assert.equal(Number(may.total_notes), 3);
+    assert.equal(Number(may.pending_count), 1);
+
+    const pending = await run(conn, buildMonthBlockPendingListSql(MORADIA), ["imp-may"]);
+    assert.deepEqual(pending.map((row) => row.donor_id), [ATIVO.id]);
+  });
+});
+
+test("evolução mensal e ranking: os meses anteriores à desativação ficam", async () => {
+  await withSeededDatabase(async (conn) => {
+    await deactivateFromMay(conn);
+
+    const trend = Object.fromEntries(
+      (await run(conn, buildMonthlyTrendSql(MORADIA))).map((row) => [
+        row.reference_month,
+        Number(row.total_notes),
+      ]),
+    );
+    assert.deepEqual(trend, { [MAY]: 3, [APRIL]: 2 });
+
+    // No ranking ele entra só com abril (2 notas), atrás do ativo (3).
+    const { sql, params } = buildTopDonorsQuery({ projectId: MORADIA, limit: 10 });
+    const ranking = await run(conn, sql, params);
+    assert.deepEqual(
+      ranking.map((row) => [row.donor_id, Number(row.total_notes)]),
+      [
+        [ATIVO.id, 3],
+        [INATIVO.id, 2],
+      ],
+    );
+  });
+});
+
+test("planilha de abatimento: sai o mês anterior à desativação, não o mês dela", async () => {
+  await withSeededDatabase(async (conn) => {
+    await deactivateFromMay(conn);
+    const cpfs = (rows) => rows.map((row) => String(row.cpf)).sort();
+
+    assert.deepEqual(
+      cpfs(await run(conn, buildAbatementSheetSql(MORADIA), [APRIL])),
+      [INATIVO.cpf],
+    );
+    assert.deepEqual(
+      cpfs(await run(conn, buildAbatementSheetSql(MORADIA), [MAY])),
+      [ATIVO.cpf],
+    );
+
+    // Abril + maio escolhidos juntos: a linha dele soma SÓ abril.
+    const months = await run(conn, buildMonthsAbatementSheetSql(MORADIA, 2), [APRIL, MAY]);
+    const row = months.find((item) => String(item.cpf) === INATIVO.cpf);
+    assert.equal(Number(row.notes_count), 2);
+    assert.equal(String(row.reference_months), APRIL);
+
+    // Pendentes: abril dele já foi abatido e maio não conta — fica só o ativo.
+    assert.deepEqual(
+      cpfs(await run(conn, buildPendingAbatementSheetSql(MORADIA))),
+      [ATIVO.cpf],
+    );
+  });
+});
+
+test("doador inativo sem registro de desativação não conta em mês nenhum", async () => {
+  await withSeededDatabase(async (conn) => {
+    // Cadastro anterior ao histórico de atividade: não há como saber desde
+    // quando ele está inativo, então nenhum mês dele entra.
+    await conn.query("DELETE FROM donor_activity_history");
+
+    const trend = Object.fromEntries(
+      (await run(conn, buildMonthlyTrendSql(MORADIA))).map((row) => [
+        row.reference_month,
+        Number(row.total_notes),
+      ]),
+    );
+    assert.deepEqual(trend, { [MAY]: 3 });
+  });
+});
+
+test("a regra, mês a mês: conta antes da última desativação, e sempre quando ativo", async () => {
+  await withSeededDatabase(async (conn) => {
+    // Histórico com ida e volta: desativado em abril, reativado em julho,
+    // desativado de novo em outubro.
+    await conn.query(`
+      INSERT INTO donor_activity_history (id, donor_id, event_type, reference_month)
+      VALUES
+        ('evt-2', '${INATIVO.id}', 'activated', DATE '2026-07-01'),
+        ('evt-3', '${INATIVO.id}', 'deactivated', DATE '2026-10-01')
+    `);
+
+    const counts = async (donorId, month) => {
+      const [row] = await run(
+        conn,
+        `
+          SELECT
+            ${donorCountsAtMonth("CAST(? AS DATE)")} AS counts,
+            NOT ${donorCountsAtMonth("CAST(? AS DATE)")} AS does_not_count
+          FROM donors
+          WHERE donors.id = ?
+        `,
+        [month, month, donorId],
+      );
+      // A negação nunca pode ser NULL: é ela que lista "os inativos", e uma
+      // linha com NULL sumiria dos dois lados.
+      assert.equal(row.does_not_count, !row.counts);
+      return row.counts;
+    };
+
+    // Inativo hoje: vale a ÚLTIMA desativação (outubro).
+    assert.equal(await counts(INATIVO.id, "2026-03-01"), true);
+    assert.equal(await counts(INATIVO.id, "2026-09-01"), true);
+    assert.equal(await counts(INATIVO.id, "2026-10-01"), false);
+    assert.equal(await counts(INATIVO.id, "2026-11-01"), false);
+
+    // Reativado: tudo volta, inclusive os meses em que esteve inativo.
+    await reactivate(conn);
+    assert.equal(await counts(INATIVO.id, "2026-10-01"), true);
+    assert.equal(await counts(INATIVO.id, "2026-11-01"), true);
+
+    // Quem nunca foi desativado conta sempre.
+    assert.equal(await counts(ATIVO.id, "2020-01-01"), true);
+    assert.equal(await counts(ATIVO.id, "2030-01-01"), true);
+  });
+});
+
+test("a regra em JavaScript diz o mesmo que a do SQL", () => {
+  const inactive = { isActive: false, lastDeactivationMonth: "2026-05-01" };
+
+  assert.equal(donorCountsAtMonthValue(inactive, "2026-04-01"), true);
+  assert.equal(donorCountsAtMonthValue(inactive, "2026-05-01"), false);
+  assert.equal(donorCountsAtMonthValue(inactive, "2026-06-01"), false);
+
+  // Ativo conta sempre, com ou sem desativação antiga no histórico.
+  assert.equal(
+    donorCountsAtMonthValue({ isActive: true, lastDeactivationMonth: "2026-05-01" }, "2026-06-01"),
+    true,
+  );
+  // Inativo sem registro de desativação: nenhum mês.
+  assert.equal(donorCountsAtMonthValue({ isActive: false }, "2020-01-01"), false);
+  assert.equal(
+    donorCountsAtMonthValue({ isActive: false, lastDeactivationMonth: null }, "2020-01-01"),
+    false,
+  );
 });

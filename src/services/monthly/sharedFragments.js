@@ -1,4 +1,5 @@
 import { buildTextSearchCondition, normalizeCpf } from "../db";
+import { donorCountsAtMonth } from "./summaryScopeSql.js";
 
 /**
  * Source-aggregation subselects shared between the by-month and historical
@@ -442,6 +443,9 @@ export function buildDonorConditions({
   demand = "",
   donationStartDate = "all",
   donorActiveStatus = "active",
+  // Mês da consulta (`YYYY-MM-01`). "Ativo" é sempre em relação a um mês: o
+  // doador desativado em maio ainda conta em abril.
+  referenceMonth,
   search = "",
 } = {}) {
   const conditions = [];
@@ -455,9 +459,11 @@ export function buildDonorConditions({
   }
 
   if (donorActiveStatus === "active") {
-    conditions.push("donors.is_active = TRUE");
+    conditions.push(donorCountsAtMonth("CAST(? AS DATE)"));
+    params.push(referenceMonth);
   } else if (donorActiveStatus === "inactive") {
-    conditions.push("donors.is_active = FALSE");
+    conditions.push(`NOT ${donorCountsAtMonth("CAST(? AS DATE)")}`);
+    params.push(referenceMonth);
   }
 
   if (donorId.trim()) {

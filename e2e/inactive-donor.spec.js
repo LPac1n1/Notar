@@ -2,14 +2,16 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 /**
- * Desativar um doador tira as doações dele da apuração; reativar devolve.
+ * Desativar um doador tira as doações dele da apuração DO MÊS DA DESATIVAÇÃO
+ * EM DIANTE; os meses anteriores continuam contando; reativar devolve tudo.
  *
  * A fixture tem Alice e Bruno de janeiro a março, tudo pendente, e a Gestão
  * Mensal abre ancorada em março. O teste abate março dos dois, desativa o
- * Bruno e confere que ele some da Gestão Mensal E do painel — antes ele
- * sumia só da lista. Depois reativa e confere que março volta JÁ ABATIDO: o
- * status não pode se perder no caminho, senão a mesma doação seria abatida
- * duas vezes.
+ * Bruno a partir de março e confere que ele some de março na Gestão Mensal
+ * E no painel — antes ele sumia só da lista — e que continua em fevereiro,
+ * quando ainda era ativo. Depois reativa e confere que março volta JÁ
+ * ABATIDO: o status não pode se perder no caminho, senão a mesma doação
+ * seria abatida duas vezes.
  *
  * ATENÇÃO: o e2e roda com `VITE_NOTAR_AUTH_MODE=local`, em que o DuckDB é só
  * memória. Um `page.goto()` no meio do teste APAGA tudo — navegue por clique.
@@ -70,24 +72,34 @@ test("doador inativo sai da apuração e volta inteiro ao ser reativado", async 
     timeout: 60000,
   });
 
-  // Desativa o Bruno.
+  // Desativa o Bruno a partir de março.
   await page.getByRole("link", { name: "Doadores", exact: true }).click();
   await donorRow(page, "BRUNO MORADIA")
     .getByRole("button", { name: "Desativar" })
     .click();
   const deactivateDialog = page.getByRole("dialog", { name: "Desativar doador" });
-  await deactivateDialog.getByLabel("Inativo a partir de").fill("04/2026");
+  await deactivateDialog.getByLabel("Inativo a partir de").fill("03/2026");
   await deactivateDialog.getByRole("button", { name: "Desativar doador" }).click();
   await expect(deactivateDialog).toHaveCount(0);
 
-  // Some da Gestão Mensal…
+  // Some de março na Gestão Mensal…
   await page.getByRole("link", { name: "Gestão Mensal" }).click();
   await expect(donorInMonthly(page, "ALICE MORADIA")).toHaveCount(1, {
     timeout: 60000,
   });
   await expect(donorInMonthly(page, "BRUNO MORADIA")).toHaveCount(0);
 
-  // …e do painel, que antes continuava contando com ele.
+  // …mas continua em fevereiro: ele era ativo, e desativar não reescreve o
+  // que já foi apurado.
+  await page
+    .getByRole("listitem", { name: "Selecionar Fevereiro de 2026" })
+    .click();
+  await expect(donorInMonthly(page, "BRUNO MORADIA")).toHaveCount(1, {
+    timeout: 60000,
+  });
+  await expect(donorInMonthly(page, "ALICE MORADIA")).toHaveCount(1);
+
+  // No painel, março conta só a Alice — antes ele continuava contando o Bruno.
   await page.getByRole("link", { name: "Dashboard" }).click();
   await expect(monthBlock(page)).toContainText("1 de 1 doador(es) já marcados", {
     timeout: 60000,
@@ -100,7 +112,7 @@ test("doador inativo sai da apuração e volta inteiro ao ser reativado", async 
     .getByRole("button", { name: "Reativar" })
     .click();
   const reactivateDialog = page.getByRole("dialog", { name: "Reativar doador" });
-  await reactivateDialog.getByLabel("Ativo a partir de").fill("05/2026");
+  await reactivateDialog.getByLabel("Ativo a partir de").fill("04/2026");
   await reactivateDialog.getByRole("button", { name: "Reativar doador" }).click();
   await expect(reactivateDialog).toHaveCount(0);
 

@@ -1,9 +1,9 @@
 import { donorBelongsToProject } from "../project/projectAssignmentSql.js";
 import {
   cpfSummaryBelongsToProject,
-  cpfSummaryDonorIsActive,
+  cpfSummaryDonorCounts,
   summaryBelongsToProject,
-  summaryDonorIsActive,
+  summaryDonorCounts,
   summaryIsActionable,
 } from "../monthly/summaryScopeSql.js";
 
@@ -19,7 +19,8 @@ import {
  * `monthly/summaryScopeSql.js`:
  *
  *   • só linhas de doadores que pertenciam a ESTE projeto naquele mês;
- *   • só doadores ATIVOS — desativar tira o doador da apuração;
+ *   • só doadores cujas doações contam naquele mês — o desativado sai da
+ *     apuração do mês da desativação em diante, e fica nos anteriores;
  *   • "pendente" só o que dá para resolver (com nota, não coberto por
  *     acumulado de outro mês).
  *
@@ -29,16 +30,17 @@ import {
  * cobertos por acumulado, e a lista de maio mostrava só doadores de outro.
  */
 
-// "Conta para a apuração deste projeto": pertencia a ele no mês e o doador
-// está ativo. Os dois juntos, para nenhuma consulta lembrar de um só.
+// "Conta para a apuração deste projeto": pertencia a ele no mês e as doações
+// dele contam naquele mês. Os dois juntos, para nenhuma consulta lembrar de
+// um só.
 function countedSummary(projectId) {
   return `${summaryBelongsToProject(projectId)}
-          AND ${summaryDonorIsActive()}`;
+          AND ${summaryDonorCounts()}`;
 }
 
 function countedCpfSummary(projectId) {
   return `${cpfSummaryBelongsToProject(projectId)}
-          AND ${cpfSummaryDonorIsActive()}`;
+          AND ${cpfSummaryDonorCounts()}`;
 }
 
 /** Limite da lista de pendentes. O contador é exato; a lista é para agir. */

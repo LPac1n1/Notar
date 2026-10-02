@@ -64,40 +64,98 @@ export function summaryIsActionable(alias = "monthly_donor_summary") {
 }
 
 /**
- * O doador da linha está ATIVO.
+ * O mês em que o doador foi desativado pela ÚLTIMA vez — o "inativo a partir
+ * de" que o usuário informou. NULL se ele nunca foi desativado pelo sistema.
  *
- * Desativar um doador tira as doações dele da apuração — listas, totais,
- * painel, planilha de abatimento — e reativar traz tudo de volta. Por isso o
- * critério é só de LEITURA: nenhuma linha é apagada quando o doador é
- * desativado (`reconcileImport` continua gerando o resumo dele), e o status
- * de abatimento de cada mês fica guardado para quando ele voltar.
- *
- * É a mesma regra que a lista da Gestão Mensal sempre usou
- * (`donors.is_active = TRUE`). O que faltava era as outras telas a seguirem:
- * o doador sumia da lista e continuava no painel, na visão por mês e na
- * planilha que vai para o sistema de baixa.
- *
- * Se um dia a regra virar "não conta a partir do mês da desativação", é
- * aqui — e em `cpfSummaryDonorIsActive` — que ela muda.
+ * `donorIdExpr` é a expressão SQL do id do doador na consulta de fora.
  */
-export function summaryDonorIsActive(alias = "monthly_donor_summary") {
+export function lastDeactivationMonthOf(donorIdExpr) {
+  return `(
+    SELECT max(deactivation_event.reference_month)
+    FROM donor_activity_history AS deactivation_event
+    WHERE deactivation_event.donor_id = ${donorIdExpr}
+      AND deactivation_event.event_type = 'deactivated'
+  )`;
+}
+
+/**
+ * "As doações deste doador CONTAM neste mês?"
+ *
+ *   • doador ativo: contam em todos os meses;
+ *   • doador inativo: contam os meses ANTERIORES ao mês da desativação. Do
+ *     mês da desativação em diante, não — até ele ser reativado.
+ *
+ * Desativar não reescreve o passado: os meses em que ele doou como ativo
+ * foram apurados e abatidos, e continuam nos totais, nas listas e nos
+ * relatórios. Reativar traz de volta tudo o que ficou de fora, com o status
+ * de abatimento que cada mês tinha — por isso o critério é só de LEITURA:
+ * nenhuma linha é apagada quando o doador é desativado (`reconcileImport`
+ * continua gerando o resumo dele).
+ *
+ * Doador inativo SEM evento de desativação (cadastro anterior ao histórico)
+ * não conta em mês nenhum: não há como saber desde quando.
+ *
+ * Para consultas que já têm `donors` no FROM. `monthExpr` é a expressão SQL
+ * do mês da linha (uma coluna DATE ou `CAST(? AS DATE)` — aparece uma vez
+ * só, então pode ser parâmetro).
+ *
+ * Toda tela que soma, conta ou lista doação por mês usa esta condição. Antes
+ * cada uma tinha a sua, e o doador sumia da lista e continuava no painel.
+ *
+ * Os dois `coalesce` fazem a condição ser sempre TRUE ou FALSE, nunca NULL:
+ * quem a nega (`NOT …`, para listar os inativos) receberia NULL de um doador
+ * sem evento de desativação, e a linha sumiria dos dois lados.
+ */
+export function donorCountsAtMonth(monthExpr, donorAlias = "donors") {
+  return `(
+    coalesce(${donorAlias}.is_active, FALSE)
+    OR coalesce(
+      ${monthExpr} < ${lastDeactivationMonthOf(`${donorAlias}.id`)},
+      FALSE
+    )
+  )`;
+}
+
+/**
+ * A mesma regra em JavaScript, para a linha que é montada fora do SQL (o
+ * acumulado sem resumo do mês, na visão histórica). Fica ao lado da versão
+ * SQL de propósito: são a mesma regra e mudam juntas.
+ *
+ * `month` e `lastDeactivationMonth` no formato `YYYY-MM-01`.
+ */
+export function donorCountsAtMonthValue(
+  { isActive, lastDeactivationMonth } = {},
+  month,
+) {
+  if (isActive !== false) {
+    return true;
+  }
+
+  const deactivation = String(lastDeactivationMonth ?? "").slice(0, 7);
+  const target = String(month ?? "").slice(0, 7);
+
+  return Boolean(deactivation && target && target < deactivation);
+}
+
+/** A regra, para uma linha de `monthly_donor_summary`. */
+export function summaryDonorCounts(alias = "monthly_donor_summary") {
   return `EXISTS (
     SELECT 1
     FROM donors AS counted_donor
     WHERE counted_donor.id = ${alias}.donor_id
-      AND counted_donor.is_active = TRUE
+      AND ${donorCountsAtMonth(`${alias}.reference_month`, "counted_donor")}
   )`;
 }
 
-/** O mesmo, para linhas de `import_cpf_summary`: o doador dono do CPF. */
-export function cpfSummaryDonorIsActive(alias = "import_cpf_summary") {
+/** A regra, para uma linha de `import_cpf_summary`: o doador dono do CPF. */
+export function cpfSummaryDonorCounts(alias = "import_cpf_summary") {
   return `EXISTS (
     SELECT 1
     FROM donor_cpf_links AS counted_cpf_link
     INNER JOIN donors AS counted_cpf_donor
       ON counted_cpf_donor.id = counted_cpf_link.donor_id
     WHERE counted_cpf_link.id = ${alias}.matched_source_id
-      AND counted_cpf_donor.is_active = TRUE
+      AND ${donorCountsAtMonth(`${alias}.reference_month`, "counted_cpf_donor")}
   )`;
 }
 

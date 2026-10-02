@@ -20,6 +20,11 @@ import {
   sortSummariesByAbatement,
   synthesizeAdjustmentOnlyRow,
 } from "./sharedFragments";
+import {
+  donorCountsAtMonth,
+  donorCountsAtMonthValue,
+  lastDeactivationMonthOf,
+} from "./summaryScopeSql.js";
 
 /**
  * Fetches donor metadata for a set of donor ids. Used to synthesize orphan-
@@ -42,6 +47,7 @@ async function fetchDonorContextById(donorIds) {
         donors.is_active,
         donors.donation_start_date,
         strftime(donors.donation_start_date, '%Y-%m-%d') AS donation_start_date_iso,
+        strftime(${lastDeactivationMonthOf("donors.id")}, '%Y-%m-01') AS last_deactivation_month,
         holder_people.name AS holder_name,
         holder_people.cpf AS holder_cpf,
         holder_active_donors.id AS active_holder_donor_id
@@ -108,13 +114,21 @@ export async function listHistoricalMonthlySummaries({
     params.push(...searchCondition.params);
   }
 
+  // "Ativo" é em relação ao mês de CADA linha: o doador desativado em maio
+  // continua com os meses anteriores aqui.
+  const countsThatMonth = donorCountsAtMonth(
+    "monthly_donor_summary.reference_month",
+  );
+
   if (donorActiveStatus === "active") {
-    // Use coalesce so legacy rows where `donors` was deleted (and the join
-    // produces NULL) still show up — the historical view is meant to be the
-    // long-term ledger, including for donors no longer registered.
-    conditions.push("coalesce(donors.is_active, TRUE) = TRUE");
+    // The coalesce keeps legacy rows where `donors` was deleted (and the join
+    // produces NULL) — the historical view is meant to be the long-term
+    // ledger, including for donors no longer registered.
+    conditions.push(
+      `(coalesce(donors.is_active, TRUE) = TRUE OR ${countsThatMonth})`,
+    );
   } else if (donorActiveStatus === "inactive") {
-    conditions.push("donors.is_active = FALSE");
+    conditions.push(`(donors.is_active = FALSE AND NOT ${countsThatMonth})`);
   }
 
   if (referenceMonth) {
@@ -240,7 +254,14 @@ export async function listHistoricalMonthlySummaries({
 
         // Apply the same donor-side filters used in the SQL WHERE so orphan
         // rows respect filters like donorActiveStatus, donorType, demand etc.
-        const donorActive = donor.is_active !== false;
+        // "Ativo" é no mês do acumulado, pela mesma regra do WHERE.
+        const donorActive = donorCountsAtMonthValue(
+          {
+            isActive: donor.is_active,
+            lastDeactivationMonth: donor.last_deactivation_month,
+          },
+          adjustment.referenceMonth,
+        );
         if (donorActiveStatus === "active" && !donorActive) return null;
         if (donorActiveStatus === "inactive" && donorActive) return null;
         if (donorId.trim() && donor.id !== donorId.trim()) return null;

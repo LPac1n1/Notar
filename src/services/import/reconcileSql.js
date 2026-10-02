@@ -6,7 +6,7 @@
  *
  * SEM filtro de doador ativo, de propósito. O resumo é o registro do que foi
  * doado; se o doador conta ou não na apuração é decidido na leitura
- * (`summaryDonorIsActive`, em `monthly/summaryScopeSql.js`). Com o filtro
+ * (`summaryDonorCounts`, em `monthly/summaryScopeSql.js`). Com o filtro
  * aqui, reconciliar uma importação apagava as linhas de quem estava inativo —
  * junto com o status de abatimento delas —, e reativar o doador trazia os
  * meses de volta como pendentes, prontos para serem abatidos de novo.

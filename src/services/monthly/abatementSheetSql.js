@@ -1,4 +1,5 @@
 import { donorBelongedToProjectAtMonth } from "../project/projectAssignmentSql.js";
+import { donorCountsAtMonth } from "./summaryScopeSql.js";
 
 /**
  * SQL da planilha de abatimento (uma linha por CPF de doador que enviou notas
@@ -57,15 +58,31 @@ const SHEET_FROM = `
   INNER JOIN donor_cpf_links
     ON donor_cpf_links.id = import_cpf_summary.matched_source_id
     AND donor_cpf_links.is_active = TRUE
-  -- Doador inativo não vai para o sistema de baixa: a planilha é a lista de
-  -- quem tem abatimento a receber, e desativar tira o doador da apuração.
   INNER JOIN donors
     ON donors.id = donor_cpf_links.donor_id
-    AND donors.is_active = TRUE
   -- LEFT: só o auxiliar tem holder_person_id. Para o titular o join não casa,
   -- e o coalesce acima faz a linha usar a identidade dele mesmo.
   LEFT JOIN people AS holder_people
     ON holder_people.id = donors.holder_person_id`;
+
+/**
+ * O que entra em QUALQUER das planilhas, linha a linha de `import_cpf_summary`:
+ *
+ *  • o doador pertencia ao projeto no mês da linha — um doador transferido
+ *    não leva os meses antigos para a planilha do projeto novo;
+ *
+ *  • as doações dele contam naquele mês — o doador desativado não vai para o
+ *    sistema de baixa do mês da desativação em diante; os meses anteriores,
+ *    em que ele doou como ativo, continuam saindo.
+ */
+function sheetScope(projectId) {
+  return `${donorBelongedToProjectAtMonth(
+    "donors.id",
+    "import_cpf_summary.reference_month",
+    projectId,
+  )}
+    AND ${donorCountsAtMonth("import_cpf_summary.reference_month")}`;
+}
 
 const SHEET_GROUP_AND_ORDER = `
   GROUP BY
@@ -91,11 +108,7 @@ export function buildAbatementSheetSql(projectId) {
   ${SHEET_FROM}
   WHERE import_cpf_summary.reference_month = ?
     AND import_cpf_summary.notes_count > 0
-    AND ${donorBelongedToProjectAtMonth(
-      "donors.id",
-      "import_cpf_summary.reference_month",
-      projectId,
-    )}
+    AND ${sheetScope(projectId)}
   ${SHEET_GROUP_AND_ORDER}
 `;
 }
@@ -161,11 +174,7 @@ export function buildMonthsAbatementSheetSql(projectId, monthCount) {
   ${SHEET_DONATION_MONTHS_JOIN}
   WHERE import_cpf_summary.reference_month IN (${placeholders})
     AND import_cpf_summary.notes_count > 0
-    AND ${donorBelongedToProjectAtMonth(
-      "donors.id",
-      "import_cpf_summary.reference_month",
-      projectId,
-    )}
+    AND ${sheetScope(projectId)}
   ${SHEET_GROUP_AND_ORDER}
 `;
 }
@@ -203,11 +212,7 @@ export function buildPendingAbatementSheetSql(projectId) {
   ${SHEET_FROM}
   ${SHEET_DONATION_MONTHS_JOIN}
   WHERE import_cpf_summary.notes_count > 0
-    AND ${donorBelongedToProjectAtMonth(
-      "donors.id",
-      "import_cpf_summary.reference_month",
-      projectId,
-    )}
+    AND ${sheetScope(projectId)}
     AND EXISTS (
       SELECT 1
       FROM monthly_donor_summary

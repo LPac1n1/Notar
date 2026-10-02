@@ -24,6 +24,7 @@ import {
   mergeAdjustmentsByMonth,
   sortSummariesByAbatement,
 } from "./sharedFragments";
+import { donorCountsAtMonth } from "./summaryScopeSql.js";
 
 /**
  * Lists monthly summaries for a single reference month.
@@ -64,6 +65,7 @@ export async function listMonthlySummariesByMonth({
       demand,
       donationStartDate,
       donorActiveStatus: "active",
+      referenceMonth: normalizedReferenceMonth,
       search,
     });
   // Recorte do projeto. Os dois ramos usam o mês da LINHA, não o vínculo
@@ -104,10 +106,17 @@ export async function listMonthlySummariesByMonth({
     ),
   );
 
+  // "Ativo" é em relação ao mês da linha: o doador desativado depois deste
+  // mês continua aqui. As duas consultas usam a mesma regra — se divergirem,
+  // o doador entra por uma e some pela outra.
+  const countsThisMonth = donorCountsAtMonth(
+    "monthly_donor_summary.reference_month",
+  );
+
   if (donorActiveStatus === "active") {
-    monthlyRowsConditions.push("donors.is_active = TRUE");
+    monthlyRowsConditions.push(countsThisMonth);
   } else if (donorActiveStatus === "inactive") {
-    monthlyRowsConditions.push("donors.is_active = FALSE");
+    monthlyRowsConditions.push(`NOT ${countsThisMonth}`);
   }
 
   if (donorId.trim()) {

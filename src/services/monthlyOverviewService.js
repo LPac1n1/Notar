@@ -1,7 +1,7 @@
 import { getActiveProjectId } from "./activeProject.js";
 import {
   summaryBelongsToProject,
-  summaryDonorIsActive,
+  summaryDonorCounts,
   summaryIsActionable,
 } from "./monthly/summaryScopeSql.js";
 import { query } from "./db";
@@ -125,10 +125,11 @@ export async function getMonthlyImportsOverview() {
         -- O rollup de abatimento é do projeto que apura. Sem o recorte,
         -- a visão por mês somaria as pendências de todos os projetos.
         WHERE ${summaryBelongsToProject(getActiveProjectId())}
-          -- Doador inativo sai da apuração: a Gestão Mensal não o lista, e
-          -- contar aqui o abatimento dele anunciaria pendência que não aparece
-          -- em tela nenhuma.
-          AND ${summaryDonorIsActive()}
+          -- Doador desativado sai da apuração do mês da desativação em
+          -- diante: a Gestão Mensal não o lista nesses meses, e contar aqui o
+          -- abatimento dele anunciaria pendência que não aparece em tela
+          -- nenhuma.
+          AND ${summaryDonorCounts()}
       ) AS mds
       GROUP BY mds.reference_month
     `),

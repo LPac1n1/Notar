@@ -14,10 +14,11 @@ import { reconcileImportsForCpfs } from "../importService";
  * pure reads (donorProfile.js) so the domain rules around chronology stay
  * isolated and unit-testable.
  *
- * Desativar NÃO apaga nada: tira o doador da apuração, e isso é decidido na
- * leitura (`summaryDonorIsActive`). O resumo mensal dele — com o status de
- * abatimento de cada mês — fica guardado, e é por isso que reativar o traz de
- * volta exatamente como estava.
+ * Desativar NÃO apaga nada: tira o doador da apuração do mês informado em
+ * diante, e isso é decidido na leitura (`donorCountsAtMonth`, em
+ * `monthly/summaryScopeSql.js`). Os meses anteriores continuam contando. O
+ * resumo mensal dele — com o status de abatimento de cada mês — fica
+ * guardado, e é por isso que reativar o traz de volta exatamente como estava.
  */
 
 async function listDonorCpfs(donorId) {

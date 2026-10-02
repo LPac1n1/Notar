@@ -7,7 +7,7 @@ import {
   MATCHED_CREDIT_BY_DONOR_MONTH,
 } from "./project/projectAssignmentSql.js";
 import { buildMonthlyTrendSql } from "./dashboard/monthlyTrendSql.js";
-import { summaryDonorIsActive } from "./monthly/summaryScopeSql.js";
+import { summaryDonorCounts } from "./monthly/summaryScopeSql.js";
 import {
   buildMonthBlockComparisonSql,
   buildMonthBlockDemandsSql,
@@ -175,7 +175,7 @@ async function _fetchDashboardOverview(referenceMonth) {
            "monthly_donor_summary.reference_month",
            projectId,
          )}
-           AND ${summaryDonorIsActive()}) AS notes_count,
+           AND ${summaryDonorCounts()}) AS notes_count,
         (SELECT coalesce(sum(monthly_donor_summary.invalid_notes_count), 0)
          FROM monthly_donor_summary
          WHERE ${donorBelongedToProjectAtMonth(
@@ -183,7 +183,7 @@ async function _fetchDashboardOverview(referenceMonth) {
            "monthly_donor_summary.reference_month",
            projectId,
          )}
-           AND ${summaryDonorIsActive()}) AS invalid_notes_count,
+           AND ${summaryDonorCounts()}) AS invalid_notes_count,
         (SELECT coalesce(sum(project_credit.total_credit), 0) FROM (
           WITH credit AS (${MATCHED_CREDIT_BY_DONOR_MONTH})
           SELECT credit.total_credit
@@ -197,7 +197,7 @@ async function _fetchDashboardOverview(referenceMonth) {
         (SELECT coalesce(sum(monthly_donor_summary.abatement_amount), 0)
          FROM monthly_donor_summary
          WHERE monthly_donor_summary.abatement_status = 'applied'
-           AND ${summaryDonorIsActive()}
+           AND ${summaryDonorCounts()}
            AND ${donorBelongedToProjectAtMonth(
              "monthly_donor_summary.donor_id",
              "monthly_donor_summary.reference_month",
