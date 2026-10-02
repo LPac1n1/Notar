@@ -47,6 +47,14 @@ export async function createTestConnection() {
         },
       });
     },
+    // Arquivo virtual, como o `registerFileText` da conexão de produção —
+    // é por onde a restauração rápida entrega o JSON de cada tabela.
+    registerFileText(name, text) {
+      bindings.registerFileText(name, text);
+    },
+    dropFile(name) {
+      bindings.dropFile(name);
+    },
     close() {
       rawConn.close();
       bindings.terminate?.();

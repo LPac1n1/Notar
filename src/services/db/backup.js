@@ -14,9 +14,20 @@ import {
   flushAfterTransaction,
   getConnection,
   initDB,
+  registerFileText,
+  releaseRegisteredFile,
   runInTransaction,
   runStructuralReload,
 } from "./connection.js";
+import {
+  COLUMN_TYPES_SQL,
+  buildDropIndexSql,
+  buildDuplicateKeyCheckSql,
+  buildJsonRestoreInsertSql,
+  buildRestorableIndexesSql,
+  parseIndexColumns,
+  restoreFileNameFor,
+} from "./restoreSql.js";
 import { notifyDatabaseChanged } from "./events.js";
 import { CREDIT_RECONCILE_STATEMENTS } from "../reconciliation/creditReconcileSql.js";
 import { query } from "./connection.js";
@@ -334,17 +345,7 @@ export async function restoreDatabaseSnapshot(
     ["trash_items", normalizedSnapshot.trashItems],
   ];
 
-  // Chunked bulk insert. Restoring a 30k+ row table one INSERT at a time
-  // through DuckDB-WASM's single-threaded executor took several seconds per
-  // table; multi-row VALUES in batches of 500 brings the same load under a
-  // second. The chunk size leaves plenty of headroom under DuckDB's parsed-
-  // SQL size limit even for the widest table here (donation_notes, 13 cols).
-  const BULK_INSERT_CHUNK_SIZE = 500;
-
-  // Pre-compute the per-table row count so the progress callback can
-  // report a meaningful "X / Y rows" indicator. Costs an extra pass over
-  // the snapshot but it's all in-memory JS arrays — negligible compared
-  // to the actual INSERTs.
+  // Total de linhas, para o indicador "X de Y" da tela de carregamento.
   const totalRowsToInsert = tableEntriesToInsert.reduce(
     (sum, [, rows]) => sum + (rows?.length ?? 0),
     0,
@@ -360,75 +361,61 @@ export async function restoreDatabaseSnapshot(
     });
   };
 
-  await runInTransaction(
-    async () => {
-      for (const tableName of tableOrderToClear) {
-        await execute(`DELETE FROM ${tableName}`);
-      }
+  // As colunas de cada tabela são decididas UMA vez: as permitidas que a
+  // primeira linha traz. Chave ausente nas demais linhas vira NULL, então um
+  // backup antigo, sem colunas mais novas, continua entrando.
+  const tablesToLoad = [];
+  for (const [tableName, rows] of tableEntriesToInsert) {
+    if (!rows || rows.length === 0) continue;
 
-      for (const [tableName, rows] of tableEntriesToInsert) {
-        if (!rows || rows.length === 0) continue;
+    const allowedColumns = RESTORE_TABLE_COLUMNS[tableName] ?? [];
+    const columns = Object.keys(rows[0] ?? {}).filter((columnName) =>
+      allowedColumns.includes(columnName),
+    );
+    if (columns.length === 0) continue;
 
-        const allowedColumns = RESTORE_TABLE_COLUMNS[tableName] ?? [];
-        if (allowedColumns.length === 0) continue;
+    tablesToLoad.push({ tableName, rows, columns });
+  }
 
+  // A reposição do estado de projeto (projeto padrão, demanda sem projeto,
+  // doador sem vínculo) NÃO fica em nenhum dos dois caminhos abaixo: vive em
+  // `runSchemaBootstrap`, que roda logo depois, no reload estrutural. Precisa
+  // ser lá porque as normalizações podem CRIAR doadores — a conversão do
+  // modelo antigo de auxiliares é um caso — e um doador criado depois deste
+  // ponto ficaria sem vínculo.
+  let strategy = "json";
+  try {
+    restoredRows = 0;
+    await restoreTablesFromJson({
+      tableOrderToClear,
+      tablesToLoad,
+      onTableLoaded: (tableName, rowCount) => {
+        restoredRows += rowCount;
         notifyProgress(tableName);
-
-        // Decide the column set ONCE per table — taken from the union of
-        // allowed columns and what the first row carries. All subsequent
-        // rows are coerced to the same column order; missing keys serialize
-        // as NULL so a heterogeneous payload (legacy backup without new
-        // columns) still imports cleanly.
-        const sampleColumns = Object.keys(rows[0] ?? {}).filter((columnName) =>
-          allowedColumns.includes(columnName),
-        );
-        if (sampleColumns.length === 0) continue;
-
-        for (
-          let chunkStart = 0;
-          chunkStart < rows.length;
-          chunkStart += BULK_INSERT_CHUNK_SIZE
-        ) {
-          const chunk = rows.slice(
-            chunkStart,
-            chunkStart + BULK_INSERT_CHUNK_SIZE,
-          );
-          // Os valores vêm do arquivo de backup, que é conteúdo fornecido
-          // pelo usuário — é a entrada menos confiável que chega ao banco.
-          // Por isso vão todos por parâmetro, e o SQL varia só na quantidade
-          // de tuplas. Os nomes de coluna continuam interpolados porque o
-          // DuckDB não aceita `?` em posição de identificador, mas eles já
-          // passaram pela allowlist de `allowedColumns` logo acima.
-          const rowPlaceholders = `(${sampleColumns.map(() => "?").join(", ")})`;
-          const valuesSql = chunk.map(() => rowPlaceholders).join(",\n");
-          const params = chunk.flatMap((row) =>
-            sampleColumns.map((columnName) => {
-              const value = row[columnName];
-              return value === undefined ? null : value;
-            }),
-          );
-
-          await executePrepared(
-            `
-            INSERT INTO ${tableName} (${sampleColumns.join(", ")})
-            VALUES ${valuesSql}
-          `,
-            params,
-          );
-          restoredRows += chunk.length;
-          notifyProgress(tableName);
-        }
-      }
-
-      // A reposição do estado de projeto (projeto padrão, demanda sem
-      // projeto, doador sem vínculo) NÃO fica aqui: vive em
-      // `runSchemaBootstrap`, que roda logo abaixo no reload estrutural.
-      // Precisa ser lá porque as normalizações podem CRIAR doadores — a
-      // conversão do modelo antigo de auxiliares é um caso — e um doador
-      // criado depois deste ponto ficaria sem vínculo.
-    },
-    { emitChange: false },
-  );
+      },
+      onTableStart: notifyProgress,
+    });
+  } catch (fastPathError) {
+    // O caminho rápido depende do leitor de JSON do DuckDB, que é uma
+    // extensão. Se ela não estiver disponível — ou se qualquer outra coisa
+    // der errado —, a transação foi desfeita e o banco está como antes:
+    // refaz pelo caminho antigo, mais lento e sem dependência nenhuma.
+    console.warn(
+      "Restauração rápida indisponível; usando o caminho por parâmetros.",
+      fastPathError,
+    );
+    strategy = "parameters";
+    restoredRows = 0;
+    await restoreTablesWithParameters({
+      tableOrderToClear,
+      tablesToLoad,
+      onChunkLoaded: (tableName, rowCount) => {
+        restoredRows += rowCount;
+        notifyProgress(tableName);
+      },
+      onTableStart: notifyProgress,
+    });
+  }
 
   await runStructuralReload();
 
@@ -464,6 +451,196 @@ export async function restoreDatabaseSnapshot(
   if (emitChange) {
     notifyDatabaseChanged({ source: "restore" });
   }
+
+  return { strategy };
+}
+
+/**
+ * Caminho rápido: o DuckDB lê o JSON de cada tabela (ver `restoreSql.js`).
+ *
+ * Três tempos, e a ordem é imposta pelo DuckDB:
+ *
+ *   1. Os índices são derrubados, fora de transação.
+ *   2. Limpeza e carga rodam numa transação. Antes do commit, a unicidade
+ *      que os índices únicos garantiriam é conferida por consulta.
+ *   3. Os índices são recriados, depois do commit.
+ *
+ * Não dá para fazer tudo numa transação só. O DuckDB não aceita derrubar e
+ * recriar um índice de mesmo nome na mesma transação; e um índice único
+ * criado na transação que apagou e reinseriu a mesma chave enxerga as duas
+ * versões da linha e acusa duplicata no commit.
+ *
+ * O que a ordem preserva: se a carga falhar — arquivo com chave repetida
+ * incluído —, a transação é desfeita, os índices voltam sobre os dados
+ * antigos e o banco fica como estava.
+ */
+async function restoreTablesFromJson({
+  tableOrderToClear,
+  tablesToLoad,
+  onTableStart,
+  onTableLoaded,
+}) {
+  const columnTypesByTable = new Map();
+  for (const row of await query(COLUMN_TYPES_SQL)) {
+    const tableName = String(row.table_name);
+    if (!columnTypesByTable.has(tableName)) {
+      columnTypesByTable.set(tableName, new Map());
+    }
+    columnTypesByTable
+      .get(tableName)
+      .set(String(row.column_name), String(row.data_type));
+  }
+
+  const indexes = await query(buildRestorableIndexesSql(tableOrderToClear));
+  const registeredFiles = [];
+
+  // A conferência de unicidade precisa saber as colunas de cada índice
+  // único. Se algum não der para interpretar, o caminho rápido desiste
+  // ANTES de mexer em qualquer coisa: carregar sem conseguir conferir seria
+  // trocar uma garantia por velocidade.
+  const uniqueKeys = indexes
+    .filter((index) => Boolean(index.is_unique))
+    .map((index) => {
+      const columns = parseIndexColumns(index.sql);
+      if (!columns) {
+        throw new Error(
+          `Índice único sem colunas reconhecíveis: ${String(index.index_name)}`,
+        );
+      }
+      return { table: String(index.table_name), columns };
+    });
+
+  // `flush: false` nas instruções de índice: são estrutura, não dado. Sem
+  // isso cada uma agendaria sincronização e avisaria as telas no meio da
+  // restauração.
+  for (const index of indexes) {
+    await execute(buildDropIndexSql(String(index.index_name)), { flush: false });
+  }
+
+  try {
+    await runInTransaction(
+      async () => {
+        for (const tableName of tableOrderToClear) {
+          await execute(`DELETE FROM ${tableName}`);
+        }
+
+        for (const { tableName, rows, columns } of tablesToLoad) {
+          onTableStart?.(tableName);
+
+          const fileName = restoreFileNameFor(tableName);
+          // As linhas viajam para o worker como um texto só, e não valor a
+          // valor. O conteúdo vem do arquivo de backup — a entrada menos
+          // confiável que chega ao banco —, e continua sem tocar em SQL: é
+          // DADO lido pelo `read_json`, nunca parte da instrução.
+          await registerFileText(fileName, JSON.stringify(rows));
+          registeredFiles.push(fileName);
+
+          await execute(
+            buildJsonRestoreInsertSql({
+              table: tableName,
+              columns,
+              columnTypes: columnTypesByTable.get(tableName) ?? new Map(),
+              fileName,
+            }),
+          );
+
+          onTableLoaded?.(tableName, rows.length);
+        }
+
+        for (const { table, columns } of uniqueKeys) {
+          const duplicated = await query(buildDuplicateKeyCheckSql(table, columns));
+          if (duplicated.length > 0) {
+            throw new Error(
+              `O arquivo tem linhas repetidas em ${table} (${columns.join(", ")}).`,
+            );
+          }
+        }
+      },
+      { emitChange: false },
+    );
+  } catch (error) {
+    // A transação desfez a carga; os índices precisam voltar por aqui.
+    // `IF NOT EXISTS` não se aplica — o SQL vem do catálogo como foi criado —,
+    // então cada falha é engolida: um índice que por acaso já exista de novo
+    // não pode impedir os outros de voltarem.
+    for (const index of indexes) {
+      await execute(String(index.sql), { flush: false }).catch(() => null);
+    }
+    throw error;
+  } finally {
+    for (const fileName of registeredFiles) {
+      await releaseRegisteredFile(fileName);
+    }
+  }
+
+  // Dados confirmados; os índices voltam. A unicidade já foi conferida, então
+  // uma falha aqui não é esperada — mas, se acontecer, não pode impedir os
+  // outros índices de voltarem nem derrubar uma restauração que já entrou.
+  for (const index of indexes) {
+    await execute(String(index.sql), { flush: false }).catch((error) => {
+      console.error(
+        `Restauração: não foi possível recriar o índice ${String(index.index_name)}.`,
+        error,
+      );
+    });
+  }
+}
+
+/**
+ * Caminho antigo: blocos de 500 linhas, cada valor como parâmetro. Fica como
+ * reserva do caminho rápido.
+ */
+async function restoreTablesWithParameters({
+  tableOrderToClear,
+  tablesToLoad,
+  onTableStart,
+  onChunkLoaded,
+}) {
+  const BULK_INSERT_CHUNK_SIZE = 500;
+
+  await runInTransaction(
+    async () => {
+      for (const tableName of tableOrderToClear) {
+        await execute(`DELETE FROM ${tableName}`);
+      }
+
+      for (const { tableName, rows, columns } of tablesToLoad) {
+        onTableStart?.(tableName);
+
+        for (
+          let chunkStart = 0;
+          chunkStart < rows.length;
+          chunkStart += BULK_INSERT_CHUNK_SIZE
+        ) {
+          const chunk = rows.slice(
+            chunkStart,
+            chunkStart + BULK_INSERT_CHUNK_SIZE,
+          );
+          // Os nomes de coluna são interpolados porque o DuckDB não aceita
+          // `?` em posição de identificador, mas já passaram pela lista de
+          // colunas permitidas. Os valores vão todos por parâmetro.
+          const rowPlaceholders = `(${columns.map(() => "?").join(", ")})`;
+          const valuesSql = chunk.map(() => rowPlaceholders).join(",\n");
+          const params = chunk.flatMap((row) =>
+            columns.map((columnName) => {
+              const value = row[columnName];
+              return value === undefined ? null : value;
+            }),
+          );
+
+          await executePrepared(
+            `
+            INSERT INTO ${tableName} (${columns.join(", ")})
+            VALUES ${valuesSql}
+          `,
+            params,
+          );
+          onChunkLoaded?.(tableName, chunk.length);
+        }
+      }
+    },
+    { emitChange: false },
+  );
 }
 
 function createBackupFileName() {
