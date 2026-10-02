@@ -129,10 +129,22 @@ export function getDemandRowCount(group) {
   return group.holders.length + group.auxiliaries.length;
 }
 
-function getAdjustmentNoteText(row) {
-  if (!row || (row.adjustmentNotesCount ?? 0) <= 0) {
+function getAdjustmentNoteText(row, reportData) {
+  if (!row) {
     return "";
   }
+
+  if ((row.adjustmentNotesCount ?? 0) <= 0) {
+    // Sem acumulado próprio, mas com as doações do período abatidas junto de
+    // um acumulado lançado em outro mês: a linha sai zerada, e sem esta nota
+    // pareceria que a pessoa não doou.
+    return row.coveredByAccumulatedMonth
+      ? "Doações incluídas no acumulado de " +
+          formatMonthAbbrev(row.coveredByAccumulatedMonth)
+      : "";
+  }
+
+  const isMultiMonthReport = (reportData?.referenceMonths?.length ?? 0) > 1;
 
   const start = row.adjustmentRangeStartMonth;
   const end = row.adjustmentRangeEndMonth;
@@ -148,9 +160,14 @@ function getAdjustmentNoteText(row) {
         ? `Acumulado de ${startLabel}`
         : `Acumulado de ${startLabel} a ${endLabel}`;
 
-    return row.adjustmentSubsumesMonth
-      ? `${period} (consolidado neste mês)`
-      : `${period} somado a este mês`;
+    if (!row.adjustmentSubsumesMonth) {
+      return `${period} somado a este mês`;
+    }
+
+    // Num relatório de vários meses "neste mês" não diz qual.
+    return isMultiMonthReport && row.adjustmentReferenceMonth
+      ? `${period} (consolidado em ${formatMonthAbbrev(row.adjustmentReferenceMonth)})`
+      : `${period} (consolidado neste mês)`;
   }
 
   return row.adjustmentDescription || "Inclui acumulado de meses anteriores";
@@ -488,7 +505,7 @@ export function drawDonationReport(doc, reportData) {
       width: tableWidth * 0.52,
       getValue: (row) => row.name,
       getSubValue: (row) =>
-        [getAdjustmentNoteText(row), getMonthBreakdownText(row, reportData)]
+        [getAdjustmentNoteText(row, reportData), getMonthBreakdownText(row, reportData)]
           .filter(Boolean)
           .join("  |  "),
       bold: true,
@@ -507,7 +524,7 @@ export function drawDonationReport(doc, reportData) {
       width: tableWidth * 0.34,
       getValue: (row) => row.name,
       getSubValue: (row) =>
-        [getAdjustmentNoteText(row), getMonthBreakdownText(row, reportData)]
+        [getAdjustmentNoteText(row, reportData), getMonthBreakdownText(row, reportData)]
           .filter(Boolean)
           .join("  |  "),
       bold: true,

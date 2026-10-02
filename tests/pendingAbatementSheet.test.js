@@ -415,3 +415,24 @@ test("na planilha dos meses escolhidos, mês de fora com doação parte o rótul
     await conn.close();
   }
 });
+
+test("na planilha dos meses escolhidos, o acumulado não tira mês nenhum do doador", async () => {
+  // O relatório por demanda já perdeu meses de quem tinha acumulado: bastava
+  // a pessoa ter um para os outros meses dela serem ignorados. A planilha
+  // soma direto das notas de cada CPF, sem passar pelo acumulado — este teste
+  // trava que continua assim. Março da Maria está coberto por um acumulado
+  // lançado em abril, e os dois meses saem inteiros.
+  const conn = await createTestConnection();
+  try {
+    await seed(conn);
+
+    const linhas = await monthsSheet(conn, ["2026-03-01", "2026-04-01"]);
+    const maria = linhas.find((linha) => linha.cpf === "11111111111");
+
+    assert.equal(maria.notesCount, 5 + 7);
+    assert.deepEqual(maria.referenceMonths, ["2026-03-01", "2026-04-01"]);
+    assert.equal(maria.lastMonth, "2026-04-01");
+  } finally {
+    conn.close();
+  }
+});
