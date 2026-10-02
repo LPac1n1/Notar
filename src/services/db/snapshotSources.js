@@ -10,7 +10,10 @@
  */
 
 /**
- * As 18 tabelas do snapshot, cada uma com o SELECT que a materializa.
+ * As 17 tabelas do snapshot, cada uma com o SELECT que a materializa.
+ *
+ * `credit_reconciliation` NÃO está aqui de propósito: é derivada das notas
+ * e refeita ao restaurar — ver `DERIVED_SNAPSHOT_KEYS` em `utils/backup.js`.
  *
  * É uma tabela de dados, e não 18 blocos soltos dentro da função, porque a
  * lista precisa ser percorrida — o snapshot é montado tabela a tabela — e
@@ -319,19 +322,6 @@ export const SNAPSHOT_SOURCES = [
       CAST(created_at AS VARCHAR) AS created_at
     FROM credit_notes
     ORDER BY credit_import_id ASC, id ASC
-  `,
-  },
-  {
-    key: "creditReconciliation",
-    sql: `
-    SELECT
-      id,
-      credit_note_id,
-      donation_note_id,
-      match_status,
-      CAST(created_at AS VARCHAR) AS created_at
-    FROM credit_reconciliation
-    ORDER BY match_status ASC, id ASC
   `,
   },
 ];

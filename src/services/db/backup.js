@@ -18,6 +18,7 @@ import {
   runStructuralReload,
 } from "./connection.js";
 import { notifyDatabaseChanged } from "./events.js";
+import { CREDIT_RECONCILE_STATEMENTS } from "../reconciliation/creditReconcileSql.js";
 import { query } from "./connection.js";
 
 export const RESTORE_TABLE_COLUMNS = {
@@ -220,13 +221,9 @@ export const RESTORE_TABLE_COLUMNS = {
     "valor_cents",
     "created_at",
   ],
-  credit_reconciliation: [
-    "id",
-    "credit_note_id",
-    "donation_note_id",
-    "match_status",
-    "created_at",
-  ],
+  // `credit_reconciliation` não tem colunas de restauração: não vem do
+  // arquivo, é refeita a partir das notas no fim de
+  // `restoreDatabaseSnapshot`.
 };
 
 
@@ -334,7 +331,6 @@ export async function restoreDatabaseSnapshot(
     ["abatement_adjustments", normalizedSnapshot.abatementAdjustments],
     ["credit_imports", normalizedSnapshot.creditImports],
     ["credit_notes", normalizedSnapshot.creditNotes],
-    ["credit_reconciliation", normalizedSnapshot.creditReconciliation],
     ["trash_items", normalizedSnapshot.trashItems],
   ];
 
@@ -435,6 +431,35 @@ export async function restoreDatabaseSnapshot(
   );
 
   await runStructuralReload();
+
+  // A conciliação não viaja no arquivo: é refeita aqui, com as mesmas
+  // instruções que o motor usa em toda importação.
+  //
+  // Vem DEPOIS do reload estrutural, e não dentro da transação acima: é o
+  // reload que preenche `match_key`/`valor_cents` em arquivos anteriores a
+  // essas colunas. Conciliar antes disso deixaria todas as notas de um
+  // backup antigo sem par.
+  //
+  // Arquivos antigos que trazem a tabela gravada também passam por aqui —
+  // as linhas deles são ignoradas, então o resultado segue sempre a regra
+  // de conciliação atual, e não a do dia em que o arquivo foi salvo.
+  if (typeof onProgress === "function") {
+    onProgress({
+      phase: "reconcile",
+      currentTable: "credit_reconciliation",
+      restoredRows,
+      totalRows: totalRowsToInsert,
+    });
+  }
+  await runInTransaction(
+    async () => {
+      for (const statement of CREDIT_RECONCILE_STATEMENTS) {
+        await execute(statement);
+      }
+    },
+    { emitChange: false },
+  );
+
   await flushAfterTransaction();
   if (emitChange) {
     notifyDatabaseChanged({ source: "restore" });

@@ -80,6 +80,15 @@ test("tabela vazia vira [] e não NULL", async () => {
   }
 });
 
+test("a tabela derivada de conciliação não é exportada", () => {
+  // Ela é reconstruída a partir das notas ao restaurar. Exportá-la de novo
+  // devolveria ao arquivo o terço do tamanho que esta mudança tirou.
+  assert.equal(
+    SNAPSHOT_SOURCES.some((source) => /credit_reconciliation/.test(source.sql)),
+    false,
+  );
+});
+
 test("as chaves do snapshot cobrem exatamente as tabelas exportadas", () => {
   assert.deepEqual(
     SNAPSHOT_SOURCES.map((source) => source.key).sort(),

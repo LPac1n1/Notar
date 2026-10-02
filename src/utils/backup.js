@@ -16,14 +16,29 @@ export const SNAPSHOT_TABLE_KEYS = [
   "abatementAdjustments",
   "trashItems",
   // Reconciliation feature (Fases 1–3): per-note storage on the donations
-  // side, the full credits domain, and the derived reconciliation pairing.
-  // Without these keys here the cloud snapshot loses every credit/donation
-  // detail on reload — the user's most recent import effectively "disappears".
+  // side and the full credits domain. Without these keys here the cloud
+  // snapshot loses every credit/donation detail on reload — the user's most
+  // recent import effectively "disappears".
   "donationNotes",
   "creditImports",
   "creditNotes",
-  "creditReconciliation",
 ];
+
+/**
+ * Chaves que arquivos ANTIGOS trazem e o sistema não grava mais.
+ *
+ * `creditReconciliation` é dado derivado: sai inteiro das notas de doação e
+ * de crédito, e é refeito ao restaurar (`restoreDatabaseSnapshot`). Gravá-lo
+ * custava caro — três UUIDs aleatórios por linha, que não comprimem: no
+ * banco real era 21% do JSON e 38% do arquivo comprimido, o bastante para
+ * encostar no limite de 50 MB por arquivo do armazenamento.
+ *
+ * A chave fica listada aqui, em vez de simplesmente sumir, para deixar
+ * escrito que um arquivo que a contém é válido — só que ela é ignorada.
+ * Restaurar as linhas gravadas congelaria a regra de conciliação que valia
+ * no dia em que o arquivo foi salvo.
+ */
+export const DERIVED_SNAPSHOT_KEYS = ["creditReconciliation"];
 
 export function createEmptySnapshot() {
   return {
@@ -44,7 +59,6 @@ export function createEmptySnapshot() {
     donationNotes: [],
     creditImports: [],
     creditNotes: [],
-    creditReconciliation: [],
   };
 }
 

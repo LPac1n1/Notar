@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  DERIVED_SNAPSHOT_KEYS,
+  SNAPSHOT_TABLE_KEYS,
   buildSnapshotStats,
   createSnapshotPayload,
   normalizeSnapshotPayload,
@@ -66,7 +68,6 @@ test("snapshot helpers detect data and count rows correctly", () => {
     donationNotes: 0,
     creditImports: 0,
     creditNotes: 0,
-    creditReconciliation: 0,
   });
 });
 
@@ -83,4 +84,37 @@ test("createSnapshotPayload wraps normalized data", () => {
   assert.deepEqual(payload.data.notes, []);
   assert.deepEqual(payload.data.actionHistory, []);
   assert.deepEqual(payload.data.trashItems, []);
+});
+
+// A conciliação é DERIVADA das notas de doação e de crédito. Ela saiu do
+// snapshot (era 38% do arquivo comprimido no banco real) e é refeita ao
+// restaurar. Os arquivos gravados antes disso continuam trazendo a tabela.
+test("a conciliação não é uma tabela do snapshot", () => {
+  assert.equal(SNAPSHOT_TABLE_KEYS.includes("creditReconciliation"), false);
+  assert.deepEqual(DERIVED_SNAPSHOT_KEYS, ["creditReconciliation"]);
+});
+
+test("arquivo antigo, com a conciliação gravada, continua sendo aceito", () => {
+  const snapshot = normalizeSnapshotPayload({
+    version: 1,
+    data: {
+      donationNotes: [{ id: "d1" }],
+      creditNotes: [{ id: "c1" }],
+      creditReconciliation: [{ id: "r1", match_status: "matched" }],
+    },
+  });
+
+  assert.notEqual(snapshot, null);
+  assert.deepEqual(snapshot.donationNotes, [{ id: "d1" }]);
+  // Ignorada de propósito: restaurar as linhas gravadas congelaria a regra
+  // de conciliação que valia quando o arquivo foi salvo.
+  assert.equal("creditReconciliation" in snapshot, false);
+});
+
+test("só a conciliação no arquivo não conta como dado", () => {
+  const snapshot = normalizeSnapshotPayload({
+    creditReconciliation: [{ id: "r1" }],
+  });
+
+  assert.equal(snapshotHasData(snapshot), false);
 });

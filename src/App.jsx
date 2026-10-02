@@ -41,6 +41,13 @@ function formatProgressDescription(step) {
   if (!step) return "Preparando o Notar…";
   const baseLabel = HYDRATION_STEP_LABELS[step.step] ?? "Preparando o Notar…";
 
+  // Depois da última linha restaurada a conciliação é refeita a partir das
+  // notas. Sem um rótulo próprio a tela ficaria parada em "Restaurando …
+  // (N de N linhas)", que parece travamento.
+  if (step.phase === "reconcile") {
+    return "Refazendo a conciliação de créditos…";
+  }
+
   if (step.step !== "restore" || !step.totalRows) {
     return baseLabel;
   }

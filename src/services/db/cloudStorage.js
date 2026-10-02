@@ -1,4 +1,5 @@
 import {
+  createEmptySnapshot,
   normalizeSnapshotPayload,
   snapshotHasData,
 } from "../../utils/backup.js";
@@ -500,27 +501,6 @@ export async function hydrateFromCloud(userId, { onProgress } = {}) {
 export function resetHydrationCache() {
   hydrationPromise = null;
   hydratedUserId = null;
-}
-
-function createEmptySnapshot() {
-  return {
-    demands: [],
-    people: [],
-    donors: [],
-    donorCpfLinks: [],
-    imports: [],
-    importCpfSummary: [],
-    monthlyDonorSummary: [],
-    notes: [],
-    actionHistory: [],
-    donorActivityHistory: [],
-    abatementAdjustments: [],
-    trashItems: [],
-    donationNotes: [],
-    creditImports: [],
-    creditNotes: [],
-    creditReconciliation: [],
-  };
 }
 
 // Register the post-transaction hook so every commit/execute schedules a
