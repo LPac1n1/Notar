@@ -7,6 +7,12 @@ import {
   MATCHED_CREDIT_BY_DONOR_MONTH,
 } from "./project/projectAssignmentSql.js";
 import { buildMonthlyTrendSql } from "./dashboard/monthlyTrendSql.js";
+import {
+  buildMonthBlockComparisonSql,
+  buildMonthBlockDemandsSql,
+  buildMonthBlockPendingListSql,
+  buildMonthBlockSummarySql,
+} from "./dashboard/monthBlockSql.js";
 // A mesma consulta que alimenta o painel de projetos de crédito. Reusá-la faz
 // o crédito do mês bater por construção entre as duas telas, em vez de depender
 // de duas somas escritas separadamente continuarem concordando.
@@ -142,11 +148,6 @@ async function _fetchDashboardOverview(referenceMonth) {
     "import_cpf_summary.matched_source_id",
     projectId,
   );
-  const summaryScope = donorBelongsToProject(
-    "monthly_donor_summary.donor_id",
-    projectId,
-  );
-
   const [
     totalsRows,
     recentImportsRows,
@@ -477,91 +478,12 @@ async function _fetchDashboardOverview(referenceMonth) {
       latestUnregisteredRows,
       comparisonRows,
     ] = await Promise.all([
-      queryPrepared(
-        `
-          SELECT
-            strftime(imports.reference_month, '%Y-%m-01') AS reference_month,
-            imports.file_name,
-            imports.value_per_note,
-            strftime(imports.imported_at, '%Y-%m-%d %H:%M:%S') AS imported_at,
-            coalesce((
-              SELECT sum(notes_count)
-              FROM import_cpf_summary
-              WHERE import_id = imports.id
-                AND ${cpfLinkScope}
-            ), 0) AS total_notes,
-            coalesce((
-              SELECT sum(abatement_amount)
-              FROM monthly_donor_summary
-              WHERE import_id = imports.id
-                AND ${summaryScope}
-            ), 0) AS total_abatement,
-            coalesce((
-              SELECT count(DISTINCT donor_id)
-              FROM monthly_donor_summary
-              WHERE import_id = imports.id
-                AND ${summaryScope}
-            ), 0) AS donor_count,
-            coalesce((
-              SELECT count(*)
-              FROM monthly_donor_summary
-              WHERE import_id = imports.id
-                AND abatement_status = 'pending'
-                AND ${summaryScope}
-            ), 0) AS pending_count,
-            coalesce((
-              SELECT count(*)
-              FROM monthly_donor_summary
-              WHERE import_id = imports.id
-                AND abatement_status = 'applied'
-                AND ${summaryScope}
-            ), 0) AS applied_count,
-            coalesce((
-              SELECT count(*)
-              FROM import_cpf_summary
-              WHERE import_id = imports.id
-                AND is_registered_donor = FALSE
-            ), 0) AS unregistered_cpf_count
-          FROM imports
-          WHERE imports.id = ?
-          LIMIT 1
-        `,
-        [latestImportId],
-      ),
-      queryPrepared(
-        `
-          SELECT
-            coalesce(nullif(trim(demand), ''), 'Sem demanda') AS demand,
-            count(*) AS donor_count,
-            sum(notes_count) AS total_notes,
-            sum(abatement_amount) AS total_abatement,
-            sum(CASE WHEN abatement_status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
-            sum(CASE WHEN abatement_status = 'applied' THEN 1 ELSE 0 END) AS applied_count
-          FROM monthly_donor_summary
-          WHERE import_id = ?
-            AND ${summaryScope}
-          GROUP BY 1
-          ORDER BY total_abatement DESC, total_notes DESC, demand ASC
-        `,
-        [latestImportId],
-      ),
-      queryPrepared(
-        `
-          SELECT
-            donor_id,
-            donor_name,
-            cpf,
-            coalesce(nullif(trim(demand), ''), 'Sem demanda') AS demand,
-            notes_count,
-            abatement_amount
-          FROM monthly_donor_summary
-          WHERE import_id = ?
-            AND abatement_status = 'pending'
-          ORDER BY abatement_amount DESC, donor_name ASC
-          LIMIT 10
-        `,
-        [latestImportId],
-      ),
+      // As consultas do bloco mensal vivem em `dashboard/monthBlockSql.js`:
+      // todas usam o mesmo recorte de projeto (o vínculo NO MÊS) e a mesma
+      // definição de pendente da Gestão Mensal.
+      queryPrepared(buildMonthBlockSummarySql(projectId), [latestImportId]),
+      queryPrepared(buildMonthBlockDemandsSql(projectId), [latestImportId]),
+      queryPrepared(buildMonthBlockPendingListSql(projectId), [latestImportId]),
       queryPrepared(
         `
           SELECT
@@ -584,42 +506,12 @@ async function _fetchDashboardOverview(referenceMonth) {
       // `previousImportId` pode ser nulo — no primeiro mês não há anterior —,
       // e aí a consulta devolve zeros que o mapeamento converte em ausência
       // de comparação.
-      queryPrepared(
-        `
-          SELECT
-            coalesce((
-              SELECT sum(notes_count)
-              FROM import_cpf_summary
-              WHERE import_id = ?
-                AND ${cpfLinkScope}
-            ), 0) AS previous_notes,
-            coalesce((
-              SELECT sum(abatement_amount)
-              FROM monthly_donor_summary
-              WHERE import_id = ?
-                AND ${summaryScope}
-            ), 0) AS previous_abatement,
-            coalesce((
-              SELECT count(DISTINCT donor_id)
-              FROM monthly_donor_summary
-              WHERE import_id = ?
-                AND ${summaryScope}
-            ), 0) AS previous_donors,
-            coalesce((
-              SELECT count(*)
-              FROM donors
-              WHERE donors.is_active = TRUE
-                AND strftime(donors.donation_start_date, '%Y-%m-01') = ?
-                AND ${donorScope}
-            ), 0) AS new_donors
-        `,
-        [
-          previousImportId,
-          previousImportId,
-          previousImportId,
-          selectedMonthKey,
-        ],
-      ),
+      queryPrepared(buildMonthBlockComparisonSql(projectId), [
+        previousImportId,
+        previousImportId,
+        previousImportId,
+        selectedMonthKey,
+      ]),
     ]);
 
     latestMonth = latestMonthRows[0]

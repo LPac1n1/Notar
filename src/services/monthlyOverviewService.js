@@ -1,5 +1,8 @@
 import { getActiveProjectId } from "./activeProject.js";
-import { donorBelongedToProjectAtMonth } from "./project/projectAssignmentSql.js";
+import {
+  summaryBelongsToProject,
+  summaryIsActionable,
+} from "./monthly/summaryScopeSql.js";
 import { query } from "./db";
 
 /**
@@ -116,25 +119,11 @@ export async function getMonthlyImportsOverview() {
           monthly_donor_summary.reference_month,
           monthly_donor_summary.abatement_status,
           monthly_donor_summary.abatement_amount,
-          (
-            coalesce(monthly_donor_summary.notes_count, 0) > 0
-            AND NOT EXISTS (
-              SELECT 1
-              FROM abatement_adjustments
-              WHERE abatement_adjustments.donor_id = monthly_donor_summary.donor_id
-                AND abatement_adjustments.reference_month <> monthly_donor_summary.reference_month
-                AND abatement_adjustments.range_start_month <= monthly_donor_summary.reference_month
-                AND abatement_adjustments.range_end_month >= monthly_donor_summary.reference_month
-            )
-          ) AS is_actionable
+          ${summaryIsActionable()} AS is_actionable
         FROM monthly_donor_summary
         -- O rollup de abatimento é do projeto que apura. Sem o recorte,
         -- a visão por mês somaria as pendências de todos os projetos.
-        WHERE ${donorBelongedToProjectAtMonth(
-          "monthly_donor_summary.donor_id",
-          "monthly_donor_summary.reference_month",
-          getActiveProjectId(),
-        )}
+        WHERE ${summaryBelongsToProject(getActiveProjectId())}
       ) AS mds
       GROUP BY mds.reference_month
     `),
