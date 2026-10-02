@@ -97,6 +97,79 @@ test("as chaves do snapshot cobrem exatamente as tabelas exportadas", () => {
   );
 });
 
+// De qual tabela sai cada chave do snapshot.
+const TABLE_BY_KEY = {
+  projects: "projects",
+  donorProjectAssignments: "donor_project_assignments",
+  demands: "demands",
+  people: "people",
+  donors: "donors",
+  donorCpfLinks: "donor_cpf_links",
+  imports: "imports",
+  importCpfSummary: "import_cpf_summary",
+  monthlyDonorSummary: "monthly_donor_summary",
+  trashItems: "trash_items",
+  notes: "notes",
+  actionHistory: "action_history",
+  donorActivityHistory: "donor_activity_history",
+  abatementAdjustments: "abatement_adjustments",
+  donationNotes: "donation_notes",
+  creditImports: "credit_imports",
+  creditNotes: "credit_notes",
+};
+
+// Colunas que ficam de fora DE PROPÓSITO, por tabela, com o motivo. Hoje não
+// há nenhuma. Uma coluna nova que não esteja aqui nem no SELECT faz o teste
+// abaixo falhar.
+const COLUMNS_LEFT_OUT = {};
+
+test("toda coluna de toda tabela viaja no snapshot", async () => {
+  // Coluna esquecida no SELECT não dá erro: o valor só não vai para a nuvem,
+  // e volta vazio na próxima abertura. `invalid_notes_count` ficou assim
+  // desde que foi criada — a contagem de notas inválidas zerava a cada
+  // recarga.
+  const { conn, close } = await bootstrap();
+
+  try {
+    const catalog = (
+      await conn.query(`
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'main'
+      `)
+    )
+      .toArray()
+      .map((row) => row.toJSON());
+
+    assert.deepEqual(
+      Object.keys(TABLE_BY_KEY).sort(),
+      SNAPSHOT_SOURCES.map((source) => source.key).sort(),
+    );
+
+    for (const source of SNAPSHOT_SOURCES) {
+      const table = TABLE_BY_KEY[source.key];
+      const exported = (await conn.query(`DESCRIBE ${source.sql}`))
+        .toArray()
+        .map((row) => String(row.toJSON().column_name))
+        .sort();
+      const leftOut = COLUMNS_LEFT_OUT[table] ?? [];
+      const expected = catalog
+        .filter((row) => row.table_name === table)
+        .map((row) => String(row.column_name))
+        .filter((column) => !leftOut.includes(column))
+        .sort();
+
+      assert.deepEqual(
+        exported,
+        expected,
+        `${source.key}: as colunas exportadas não são as da tabela ${table}`,
+      );
+    }
+  } finally {
+    await close();
+  }
+});
+
 test("o JSON do DuckDB é idêntico ao do JSON.stringify", async () => {
   const { conn, close } = await bootstrap();
 

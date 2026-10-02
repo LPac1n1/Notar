@@ -40,6 +40,56 @@ export const RECONCILE_MATCHED_DONORS_SQL = `
       `;
 
 /**
+ * Refaz a contagem de notas INVÁLIDAS por CPF a partir das próprias notas.
+ *
+ * A contagem era gravada na importação e nunca ia para o arquivo da nuvem
+ * (a coluna não estava no SELECT do snapshot), então voltava zerada a cada
+ * abertura do sistema. As notas, com `is_valid`, sempre viajaram: é delas
+ * que o número sai de volta — a mesma conta da pré-visualização da
+ * importação (`count(*) FILTER (WHERE is_valid = FALSE)`).
+ *
+ * Só toca a linha cujo número está diferente, então depois da primeira vez
+ * não faz nada. Importação sem nota gravada (anterior às notas por linha)
+ * não é tocada: não há de onde tirar o número.
+ */
+export const BACKFILL_CPF_INVALID_NOTES_SQL = `
+  UPDATE import_cpf_summary
+  SET invalid_notes_count = invalid_by_cpf.total
+  FROM (
+    SELECT import_id, cpf, count(*) AS total
+    FROM donation_notes
+    WHERE is_valid = FALSE
+    GROUP BY import_id, cpf
+  ) AS invalid_by_cpf
+  WHERE invalid_by_cpf.import_id = import_cpf_summary.import_id
+    AND invalid_by_cpf.cpf = import_cpf_summary.cpf
+    AND coalesce(import_cpf_summary.invalid_notes_count, 0) <> invalid_by_cpf.total
+`;
+
+/**
+ * Leva a contagem de inválidas do CPF para o resumo do doador, com as mesmas
+ * junções de `RECONCILE_MATCHED_DONORS_SQL`. Roda depois da de cima.
+ */
+export const BACKFILL_SUMMARY_INVALID_NOTES_SQL = `
+  UPDATE monthly_donor_summary
+  SET invalid_notes_count = invalid_by_donor.total
+  FROM (
+    SELECT
+      import_cpf_summary.import_id AS import_id,
+      donor_cpf_links.donor_id AS donor_id,
+      sum(coalesce(import_cpf_summary.invalid_notes_count, 0)) AS total
+    FROM import_cpf_summary
+    INNER JOIN donor_cpf_links
+      ON donor_cpf_links.id = import_cpf_summary.matched_source_id
+      AND donor_cpf_links.is_active = TRUE
+    GROUP BY import_cpf_summary.import_id, donor_cpf_links.donor_id
+  ) AS invalid_by_donor
+  WHERE invalid_by_donor.import_id = monthly_donor_summary.import_id
+    AND invalid_by_donor.donor_id = monthly_donor_summary.donor_id
+    AND coalesce(monthly_donor_summary.invalid_notes_count, 0) <> invalid_by_donor.total
+`;
+
+/**
  * Cria o resumo mensal que FALTA: todo doador com CPF numa planilha
  * processada tem uma linha de resumo daquela importação.
  *

@@ -23,6 +23,12 @@
  * Toda data sai como VARCHAR por CAST: JSON não tem tipo de data, e deixar
  * o serializador escolher o formato faria o valor voltar diferente do que
  * entrou.
+ *
+ * TODA coluna da tabela precisa estar no SELECT. Coluna esquecida aqui não
+ * dá erro em lugar nenhum: o valor simplesmente não vai para a nuvem, e
+ * volta vazio na próxima vez que o sistema abrir. Foi o que aconteceu com
+ * `invalid_notes_count` — o teste de `snapshotSources.test.js` compara cada
+ * SELECT com as colunas da tabela para isso não se repetir.
  */
 export const SNAPSHOT_SOURCES = [
   {
@@ -153,6 +159,7 @@ export const SNAPSHOT_SOURCES = [
       CAST(reference_month AS VARCHAR) AS reference_month,
       cpf,
       notes_count,
+      invalid_notes_count,
       matched_donor_id,
       matched_source_id,
       is_registered_donor,
@@ -174,6 +181,7 @@ export const SNAPSHOT_SOURCES = [
       donor_name,
       demand,
       notes_count,
+      invalid_notes_count,
       value_per_note,
       abatement_amount,
       abatement_status,

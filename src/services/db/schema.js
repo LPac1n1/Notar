@@ -8,7 +8,11 @@ import {
   ENSURE_DEFAULT_PROJECT_SQL,
 } from "../project/projectAssignmentSql.js";
 import { DEFAULT_DEMAND_COLOR } from "../../utils/demandColor.js";
-import { INSERT_MISSING_MONTHLY_SUMMARIES_SQL } from "../import/reconcileSql.js";
+import {
+  BACKFILL_CPF_INVALID_NOTES_SQL,
+  BACKFILL_SUMMARY_INVALID_NOTES_SQL,
+  INSERT_MISSING_MONTHLY_SUMMARIES_SQL,
+} from "../import/reconcileSql.js";
 import { runMigrations } from "./migrations.js";
 
 /**
@@ -481,9 +485,16 @@ async function applyDataNormalizations(conn) {
     `).catch(() => null);
   }
 
+  // Contagem de notas inválidas, que não viajava no arquivo da nuvem. A
+  // ordem importa: primeiro por CPF; depois o resumo que falta (que já nasce
+  // com a contagem certa); por fim os resumos que já existiam.
+  await conn.query(BACKFILL_CPF_INVALID_NOTES_SQL);
+
   // Resumo mensal que falta (ver o comentário da consulta). Vem depois do
   // UPDATE de `matched_source_id` acima, do qual depende.
   await conn.query(INSERT_MISSING_MONTHLY_SUMMARIES_SQL);
+
+  await conn.query(BACKFILL_SUMMARY_INVALID_NOTES_SQL);
 
   // Idempotent backfill of the v9 reconciliation key columns. Migration v9
   // populated `match_key` / `valor_cents` for the rows that existed at the
