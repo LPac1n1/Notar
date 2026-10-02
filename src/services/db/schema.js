@@ -8,6 +8,7 @@ import {
   ENSURE_DEFAULT_PROJECT_SQL,
 } from "../project/projectAssignmentSql.js";
 import { DEFAULT_DEMAND_COLOR } from "../../utils/demandColor.js";
+import { INSERT_MISSING_MONTHLY_SUMMARIES_SQL } from "../import/reconcileSql.js";
 import { runMigrations } from "./migrations.js";
 
 /**
@@ -479,6 +480,10 @@ async function applyDataNormalizations(conn) {
       DROP TABLE IF EXISTS notar_monthly_status_backup
     `).catch(() => null);
   }
+
+  // Resumo mensal que falta (ver o comentário da consulta). Vem depois do
+  // UPDATE de `matched_source_id` acima, do qual depende.
+  await conn.query(INSERT_MISSING_MONTHLY_SUMMARIES_SQL);
 
   // Idempotent backfill of the v9 reconciliation key columns. Migration v9
   // populated `match_key` / `valor_cents` for the rows that existed at the
