@@ -9,16 +9,22 @@ function monthKey(month) {
 }
 
 /**
- * Lista de meses agregada pela consulta ("2026-01-01,2026-03-01"), já
- * ordenada. Fica aqui, e não no serviço, para o teste de integração ler o
- * resultado da consulta com a mesma função que a produção usa.
+ * Lista de meses agregada pela consulta ("2026-01-01,2026-03-01"), ordenada
+ * e sem repetição. Fica aqui, e não no serviço, para o teste de integração
+ * ler o resultado da consulta com a mesma função que a produção usa.
+ *
+ * A repetição pode vir da consulta: a linha de um CPF junta as notas do mês
+ * com as de um acumulado, e cada parte traz a própria lista de meses.
  */
 export function parseMonthList(value) {
-  return String(value ?? "")
-    .split(",")
-    .map((month) => month.trim())
-    .filter(Boolean)
-    .sort();
+  return Array.from(
+    new Set(
+      String(value ?? "")
+        .split(",")
+        .map((month) => month.trim())
+        .filter(Boolean),
+    ),
+  ).sort();
 }
 
 /**

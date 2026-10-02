@@ -46,8 +46,14 @@ function mapSheetRow(
 }
 
 /**
- * Uma linha por CPF de doador com notas no mês, pronta para importar no
- * sistema que faz o abatimento.
+ * Uma linha por CPF de doador com abatimento no mês, pronta para importar no
+ * sistema que faz o abatimento: as notas do mês e, para quem tem um acumulado
+ * lançado nele, o total do acumulado — o mesmo número que a Gestão Mensal
+ * mostra na linha daquele mês.
+ *
+ * A linha de quem tem acumulado soma vários meses, e a descrição dela os
+ * nomeia ("Doações NFP - Abr/2026 até Jun/2026"). As demais continuam com a
+ * descrição de um mês só.
  */
 export async function listAbatementSheetRows({ referenceMonth } = {}) {
   const normalizedMonth = startOfMonth(referenceMonth);
@@ -60,16 +66,17 @@ export async function listAbatementSheetRows({ referenceMonth } = {}) {
     normalizedMonth,
   ]);
 
-  // Sem `referenceMonth` na linha de propósito: todas usam o mês do arquivo.
-  return rows.map((row) => mapSheetRow(row, { referenceMonth: normalizedMonth }));
+  return rows.map(mapMultiMonthSheetRow);
 }
 
 /**
- * Linha de planilha que soma vários meses.
+ * Linha de planilha, que pode somar vários meses.
  *
- * Carrega o próprio `referenceMonth` — o mais recente do conjunto —, porque
- * aqui não existe um mês do arquivo: dois CPFs da mesma planilha podem ter
- * conjuntos diferentes, e a DATA de cada linha sai do conjunto dela.
+ * Carrega o próprio `referenceMonth` — o mês do abatimento mais recente da
+ * linha —, porque dois CPFs da mesma planilha podem ter conjuntos
+ * diferentes, e a DATA de cada linha sai do conjunto dela. Na planilha de um
+ * mês é sempre o mês do arquivo, inclusive para a linha de um acumulado: as
+ * notas são de meses anteriores, mas o abatimento é daquele mês.
  */
 function mapMultiMonthSheetRow(row) {
   const referenceMonths = parseMonthList(row.reference_months);

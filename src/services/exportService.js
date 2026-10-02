@@ -240,8 +240,13 @@ export async function exportReconciliationPairsCsv(filters = {}) {
  *   • vários selecionados → a soma deles, na ordem escolhida pelo operador;
  *   • nenhum selecionado  → todos os meses ainda pendentes.
  *
+ * Em todos, o mês é o do ABATIMENTO: quem tem um acumulado lançado no mês sai
+ * com o total do acumulado na linha daquele mês, e os meses que ele cobre
+ * não saem nas planilhas deles (ver `abatementSheetSql.js`). Por isso até a
+ * planilha de um mês só pode ter linha somando vários.
+ *
  * Somar não fica ambíguo no destino: a descrição de cada linha nomeia os meses
- * que ela soma, e a data sai do mês mais recente daquela linha.
+ * que ela soma, e a data sai do mês de abatimento mais recente daquela linha.
  */
 export async function exportAbatementSheetWorkbook({
   referenceMonth,
