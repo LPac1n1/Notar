@@ -4,6 +4,11 @@ import process from "node:process";
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
+  // Dois processos, e não o padrão (metade dos núcleos). Todos os testes
+  // dividem um servidor de dev e um DuckDB-WASM por aba; com mais processos,
+  // de 2 a 4 testes — diferentes a cada rodada — estouravam o tempo de espera
+  // por pura carga, e passavam quando rodados sozinhos.
+  workers: 2,
   timeout: 60_000,
   expect: {
     timeout: 10_000,
