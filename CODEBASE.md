@@ -74,7 +74,7 @@ Serviços externos tocados em tempo de execução:
 | Serviço | Para quê | Observação |
 |---|---|---|
 | Supabase Auth | login por magic link | sessão em `localStorage` |
-| Supabase Storage | um objeto por usuário: `{userId}/dados.json` (gzip) | bucket privado `notar` |
+| Supabase Storage | por usuário: `{userId}/manifest.json` (o índice) e `{userId}/parts/*.json.gz` (as partes). O `dados.json` do formato antigo virou um aviso; a cópia dele está em `dados-formato-antigo.json` | bucket privado `notar` |
 | `extensions.duckdb.org` | DuckDB baixa a extensão `json` em toda sessão | dependência não documentada — ver DIAGNOSTICO S8 |
 | Google Fonts | fonte Geist | `index.html` |
 
@@ -221,8 +221,9 @@ flowchart TB
             HOOKS["hooks/<br/>useDataResource · useMutationAction<br/>useDatabaseChangeEffect"]
             SERVICES["services/*<br/>regra de negócio = SQL"]
             CONN["services/db/connection.js<br/>query · queryPrepared · execute<br/>executePrepared · runInTransaction"]
-            CLOUD["services/db/cloudStorage.js<br/>debounce 2 s · conflito · flush ao sair"]
-            BACKUP["services/db/backup.js<br/>exportSnapshotText · restoreDatabaseSnapshot"]
+            CLOUD["services/db/cloudStorage.js<br/>debounce 2 s · só o que mudou · conflito"]
+            PARTS["services/db/snapshotParts.js<br/>impressão digital · índice · nomes"]
+            BACKUP["services/db/backup.js<br/>restoreDatabaseFromParts · exportSnapshotText"]
             EVENTS["services/db/events.js<br/>evento notar:data-changed"]
         end
         subgraph worker["Web Worker"]
@@ -232,7 +233,7 @@ flowchart TB
 
     subgraph supabase["Supabase"]
         AUTH["Auth — magic link"]
-        STORAGE[("Storage<br/>{userId}/dados.json (gzip)")]
+        STORAGE[("Storage<br/>{userId}/manifest.json<br/>{userId}/parts/*.json.gz")]
     end
 
     PAGES --> HOOKS --> SERVICES --> CONN
@@ -240,23 +241,26 @@ flowchart TB
     CONN -->|"depois de cada escrita"| CLOUD
     CONN -->|"notifyDatabaseChanged"| EVENTS
     EVENTS -.->|"recarrega páginas inscritas"| HOOKS
+    CLOUD --> PARTS
     CLOUD --> BACKUP --> CONN
-    CLOUD <-->|"download ao entrar<br/>upload a cada alteração"| STORAGE
+    CLOUD <-->|"download ao entrar<br/>só as partes alteradas a cada gravação"| STORAGE
     PAGES -.-> AUTH
 ```
 
 **As quatro ideias que sustentam tudo:**
 
-1. **O banco é efêmero; o blob é a verdade.** O DuckDB nasce vazio a cada
+1. **O banco é efêmero; a nuvem é a verdade.** O DuckDB nasce vazio a cada
    carregamento de página. `initDB()` cria o worker, roda as 16 migrations e
-   as normalizações; `hydrateFromCloud()` baixa o snapshot e o reinsere inteiro.
+   as normalizações; `hydrateFromCloud()` baixa o índice e as partes e reinsere
+   tudo.
    Não há OPFS nem IndexedDB — recarregar a página é refazer tudo isso.
 
 2. **Toda escrita agenda um upload do banco inteiro.** `execute`,
    `executePrepared` e `runInTransaction` chamam `flushAfterTransaction()`, que
    é `scheduleCloudFlush()` (registrado por efeito colateral de importar
-   `services/db.js`). Dois segundos depois da última escrita, o banco inteiro é
-   serializado, comprimido e enviado com `upsert`.
+   `services/db.js`). Dois segundos depois da última escrita, o DuckDB calcula
+   a impressão digital de cada parte e só as que mudaram são exportadas,
+   comprimidas e enviadas; por último, o índice.
 
 3. **As páginas reagem a eventos, não a retorno de chamada.** Depois de uma
    escrita, `notifyDatabaseChanged({ source, domains })` dispara
@@ -434,10 +438,16 @@ AuthProvider.getSession()                                   contexts/AuthContext
 └─ App → CloudSyncGate → useCloudSync()                     hooks/useCloudSync.js
    └─ hydrateFromCloud(userId, { onProgress })              services/db/cloudStorage.js
       ├─ initDB(): Worker + WASM + migrations v1..v16 + normalizações   db/connection.js, schema.js
-      ├─ downloadSnapshotFromCloud(): storage.download → gunzip → JSON.parse
-      │     404 = primeiro uso; QUALQUER outro erro propaga (isObjectNotFoundError)
-      ├─ fetchServerVersion(): storage.list → updated_at vira a "âncora"
-      └─ restoreDatabaseSnapshot(snapshot)                   db/backup.js
+      ├─ fetchServerVersion(): storage.list da pasta → "manifest:<data>" (ou
+      │     "legacy:<data>" numa conta não migrada) vira a âncora de conflito
+      ├─ hydrateFromParts(): baixa manifest.json → parseManifest (recusa índice
+      │     de versão mais nova, tabela desconhecida, tabela faltando, nome
+      │     inválido) → baixa as partes, 4 de cada vez → restoreDatabaseFromParts
+      │     (cada parte vai direto para o read_json, sem montar o banco num texto)
+      │     404 no índice = conta não migrada; QUALQUER outro erro propaga
+      ├─ senão hydrateFromLegacyFile(): o dados.json antigo, inteiro (e o
+      │     primeiro envio migra a conta — ver 8.2)
+      └─ restoreFromTableSources()                           db/backup.js
             derruba os índices → transação { DELETE de 18 tabelas;
               uma instrução por tabela: INSERT … SELECT … FROM read_json(arquivo virtual);
               confere por consulta as chaves dos índices únicos }
@@ -471,10 +481,36 @@ serviço chama executePrepared / runInTransaction             db/connection.js
    └─ uploadSnapshotImmediate(userId)                        db/cloudStorage.js
       ├─ checkForRemoteChanges(): storage.list; se mudou → banner de conflito, upload bloqueado
       └─ performUpload()
-         ├─ exportSnapshotText(): 17 SELECTs com json_group_array   db/backup.js, snapshotSources.js
-         ├─ compressSnapshot(): gzip via CompressionStream           db/snapshotCodec.js
-         ├─ storage.upload(..., { upsert: true })
+         ├─ readCurrentParts(): impressão digital de cada parte, no DuckDB   db/snapshotParts.js
+         ├─ planPartUploads(): o que difere do índice conhecido
+         ├─ por parte alterada: export (json + impressão na MESMA consulta) → gzip
+         │     → storage.upload(parts/<tabela>.<partição>.<impressão>.json.gz)
+         ├─ buildManifest() → storage.upload(manifest.json)   ← troca o banco na nuvem
+         ├─ apaga arquivos retirados há mais de 30 min
+         ├─ (conta recém-migrada) blockLegacyFile(): confere as partes, copia
+         │     dados.json para dados-formato-antigo.json e põe o aviso no lugar
          └─ fetchServerVersion() de novo para atualizar a âncora
+```
+
+**As partes.** Cada tabela é uma parte; as notas de doação e de crédito são
+uma parte por IMPORTAÇÃO (`PARTITION_COLUMN_BY_KEY`). O nome do arquivo traz
+a impressão digital do conteúdo, então um arquivo nunca é sobrescrito por
+outro conteúdo; quem estiver lendo um índice antigo continua achando o que
+ele cita. Arquivo que sai do índice fica 30 min em `retired` antes de ser
+apagado. A impressão é `count + soma(hash da linha) + xor(hash do hash)`:
+`bit_xor(hash(linha))` sozinho NÃO muda quando duas linhas recebem o mesmo
+valor novo na última coluna (medido) — a parte não subiria.
+
+**A migração e o bloqueio.** Conta no formato antigo abre pelo `dados.json` e
+o primeiro envio, sem esperar gravação do usuário, sobe todas as partes e o
+índice. Só depois de conferir que todas as partes estão na nuvem com o
+tamanho certo, o `dados.json` é copiado no servidor para
+`dados-formato-antigo.json` e trocado por um texto que não é JSON: toda
+versão anterior do sistema (desde o commit 99) acusa erro ao abrir e não
+grava nada, em vez de trabalhar em cima dos dados do dia da migração. O
+índice registra o bloqueio em `legacy`.
+
+```
 ```
 
 **Revisões.** Cada gravação soma um a `localRevision`; cada upload anota a
@@ -496,7 +532,7 @@ gatilho de fora tenta de novo: nova alteração, aba em segundo plano, evento
 enquanto o estado for de erro, para o navegador avisar antes de fechar.
 
 Camadas de proteção ao sair: `visibilitychange→hidden` e `pagehide` disparam
-flush normal; `beforeunload` tenta `fetch(keepalive)` (limite ~60 KB) e mostra
+flush normal; `beforeunload` inicia um último envio (sem garantia) e mostra
 o prompt nativo. Ao voltar o foco para a aba, `checkForRemoteChanges()` roda de
 novo. Não há polling.
 
@@ -726,8 +762,9 @@ as mensagens de erro guardadas em `action_history` contêm nomes de doadores.
 | **Conciliada / Valor diferente / Só no crédito / Só na doação / Repetida** | `matched` / `divergent` / `credit_only` / `donation_only` / `duplicate_*`. |
 | **Estabelecimento / emitente** | Loja que emitiu a nota (CNPJ). O nome só existe na planilha de créditos. |
 | **Números da sorte** | Um número por nota doada, na ordem da compra, para sorteios. |
-| **Snapshot** | O banco inteiro serializado em JSON (gzip). É o que vai para a nuvem e o que o backup baixa. |
-| **Hidratação** | Baixar o snapshot e reinserir tudo no DuckDB ao abrir o app. |
+| **Snapshot** | O banco serializado em JSON. Na nuvem vai em partes, com um índice (`snapshotParts.js`); o backup manual ainda baixa um arquivo só. |
+| **Índice / manifest** | `manifest.json`: quais arquivos de parte formam o banco. Gravá-lo é o que troca o banco na nuvem. |
+| **Hidratação** | Baixar o índice e as partes e reinserir tudo no DuckDB ao abrir o app. |
 | **Reconcile** (sem "credits") | `reconcileImport`: casar CPFs da planilha com doadores e refazer o resumo mensal. Não confundir com `reconcileCredits`. |
 
 ---

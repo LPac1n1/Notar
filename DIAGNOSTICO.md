@@ -5,7 +5,7 @@
 > fora do repositório, contra dados sintéticos e um storage falso local — o
 > Supabase real e os dados reais não foram tocados.
 
-**Situação das correções** (atualizado em 02/10/2026, commit 320)
+**Situação das correções** (atualizado em 02/10/2026, commit 324)
 
 | Item | Estado | Commit |
 |---|---|---|
@@ -21,13 +21,15 @@
 | P-B — painel acusava pendência inexistente | **Corrigido.** Painel = Gestão Mensal nos 32 meses do banco real | 310 |
 | P-C — relatório perdia meses de quem tinha acumulado | **Corrigido** | 311 |
 | P-A — doador inativo continuava contando | **Corrigido.** Uma regra só, em todas as telas e planilhas: deixa de contar do mês da desativação em diante, os meses anteriores ficam, reativar devolve tudo | 312, 316 |
-| S0 — arquivo único (limite de 50 MB volta em ~2 meses) | **Aberto — é a próxima etapa** | — |
+| S0, S5 — arquivo único, reenviado inteiro a cada alteração | **Corrigido.** Banco em 79 partes com um índice; a maior tem 4,06 MiB. Marcar um abatimento sobe 0,13 MiB em vez de 26,8 MiB. Conta migrada sozinha, arquivo antigo guardado e bloqueado | 322, 323 |
+| S15 — notas inválidas por CPF zeravam a cada abertura | **Corrigido.** A coluna não ia para a nuvem; agora vai, e é recalculada das notas (56.322 inválidas no banco real) | 321 |
+| BK1 — o backup manual ainda é um arquivo só | **Aberto.** Com ~25–30 MB de JSON a mais por mês, chega ao tamanho máximo de texto do navegador (~512 MB) por volta de abr/2027 | — |
 | SH1 — planilha de abatimento ignorava o acumulado | **Corrigido.** A linha do mês do acumulado leva o total dele; planilha = Gestão Mensal em 1.244 comparações no banco real | 319 |
 | P-D — resumos apagados dos doadores inativos | **Corrigido.** As 11 linhas voltam como pendentes ao abrir o app; o usuário confere e marca | 318 |
 | AC1 — o total do acumulado não acompanha reimportação | **Aberto — sem urgência** | — |
 
-Tudo até o commit 320 está **aplicado** na pasta em uso (02/10/2026, com
-backup exportado pelo usuário às 15:55). O usuário autorizou aplicar as
+Tudo até o commit 324 está **aplicado** na pasta em uso (02/10/2026; backup
+exportado pelo usuário às 15:55). O usuário autorizou aplicar as
 próximas alterações direto, sem pedir de novo. O `origin/main` está no
 commit 309: o push é feito por ele.
 
@@ -100,11 +102,11 @@ documentação interna é incomumente boa.
 
 | Verificação | Resultado |
 |---|---|
-| `npm test` | **315/315** no commit 319 (259 no commit 299) |
+| `npm test` | **334/334** no commit 323 (259 no commit 299) |
 | `npm run lint` | 0 erros, 0 avisos |
 | `npm run build` | ok em 1,5 s; 1 aviso (`INEFFECTIVE_DYNAMIC_IMPORT`) |
 | `npm run test:e2e` | não rodava: o Playwright 1.59.1 pede o Chromium build 1217 e só havia o 1243. Instalado depois, com autorização — resultado na linha abaixo |
-| e2e, config oficial (Chromium) | **103/103** no commit 319, com `workers: 2` (eram 96 no commit 299; os novos cobrem o modo nuvem, o doador inativo e a planilha com acumulado) |
+| e2e, config oficial (Chromium) | **105/105** no commit 323, com `workers: 2` (eram 96 no commit 299; os novos cobrem o modo nuvem — incluindo a migração para partes —, o doador inativo e a planilha com acumulado) |
 | e2e com Edge (antes de instalar o Chromium) | 93 passaram, 3 falharam — **outros** 3, que também passaram sozinhos. Falha diferente a cada rodada = instabilidade por carga, não defeito (item T4) |
 | Cópia local × GitHub | idênticas, exceto 4 arquivos órfãos só na cópia local (item C2) |
 | `npm audit` | 4 vulnerabilidades (1 alta, 3 moderadas), todas em dependência transitiva |
@@ -448,7 +450,9 @@ acumulado (319)
 
 **Aplicar na pasta em uso** — ✅ feito em 02/10/2026 (até o commit 320).
 
-**Etapa 2b — Trocar o formato do snapshot** (S0, S5, S9 — a próxima, e a que resolve o limite de vez)
+**Etapa 2b — Trocar o formato do snapshot** — ✅ feita (commits 322, 323). O que mudou em relação ao plano abaixo: a partição das notas é por IMPORTAÇÃO, e não por mês (a nota de crédito não tem mês; e no uso real há uma importação por mês); o arquivo antigo não ficou intacto, foi copiado e trocado por um aviso, por escolha do usuário, para bloquear computadores desatualizados; a remoção dos índices redundantes (S9) e o teste de tempo de hidratação ficaram para depois. Medido no banco real contra um armazenamento de teste: migração de 26,84 MiB em 79 arquivos, cópia do arquivo antigo idêntica byte a byte, índice igual ao banco parte por parte, conciliação igual ao reabrir, nenhum envio só por abrir.
+
+O plano, como estava:
 - Sair de "um JSON com tudo" para **um arquivo por tabela** (e, nas três
   tabelas grandes, **por mês de referência**), com um manifesto pequeno que
   lista os arquivos e suas versões.
@@ -539,12 +543,20 @@ O que o código não responde. Onde eu tinha um palpite, está marcado.
 - Push dos commits até o 309 feito pelo usuário.
 - **Aplicar direto:** "toda alteração que fizer não precisa da minha
   autorização para aplicar, pode fazer direto" (02/10/2026).
+- **Outros computadores** têm cópia própria, atualizada à mão pelo GitHub.
+  Na migração, o arquivo antigo é **bloqueado** (cópia guardada, aviso no
+  lugar) em vez de deixado como estava (02/10/2026).
 - Resumos apagados dos inativos: recriar como pendentes — commit 318.
 - Planilha de abatimento: o mês do acumulado leva o total dos meses que
   ele cobre — commit 319.
 
 **Em aberto**
 
+0. **Outros computadores:** cada um tem a própria cópia, atualizada à mão
+   pelo GitHub. Depois da migração, um computador desatualizado mostra erro
+   ao abrir ("O snapshot armazenado na nuvem não está em um JSON válido") até
+   receber `git pull` e `npm install`. Para isso o push precisa ter sido feito
+   deste computador.
 1. **Planilhas de fev/2026 e mai/2026 já enviadas ao sistema de baixa:**
    saíram antes da correção, só com as notas do mês. Os meses cobertos pelos
    acumulados (1.896 notas) foram abatidos lá? Se não, reexportar fev e mai.

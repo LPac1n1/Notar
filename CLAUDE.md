@@ -746,11 +746,23 @@ Duas respostas do usuário, e uma autorização que muda o fluxo: **"toda altera
 - **Aviso que ficou com o usuário:** as planilhas de fev/2026 e mai/2026 exportadas antes da correção saíram só com as notas do mês.
 - 315 testes (12 novos; a exclusão do mês coberto verificada por mutação: 11 falham), 103/103 e2e (1 novo, que lança o acumulado pela interface e reabre o .xlsx), lint 0 erros, build OK.
 
-**Ainda aberto, na ordem do roteiro:** etapa 2b — um arquivo por tabela e por mês. É a que resolve o limite de 50 MB de vez; a 1b só comprou uns dois meses (agosto/2026 passa do limite de novo).
+## Snapshot em partes: o limite de 50 MB deixa de existir (commits 321-324)
+
+A etapa 2b do roteiro. Antes de começar, o desenho e os riscos foram explicados ao usuário, e uma decisão foi dele: como cada computador é atualizado à mão pelo GitHub, um computador com a versão antiga continuaria lendo e gravando o `dados.json` velho — ele escolheu **bloquear** (guardar uma cópia e trocar o arquivo por um aviso) em vez de só avisar.
+
+- **Commit 321 — notas inválidas não iam para a nuvem.** `invalid_notes_count` faltava no SELECT do snapshot de `import_cpf_summary` e `monthly_donor_summary`: zerava a cada abertura. Agora vai, e `BACKFILL_*_INVALID_NOTES_SQL` recalcula das notas (no banco real, as 56.322 inválidas casam com os resumos por CPF, e a contagem de válidas bate em 2.458 de 2.458 linhas). Teste novo em `snapshotSources.test.js` compara cada SELECT com as colunas da tabela — coluna esquecida não dá erro em lugar nenhum, só some.
+- **Commit 322 — o formato.** `db/snapshotParts.js` (puro): uma parte por tabela; notas de doação e de crédito, uma por importação. Impressão digital calculada no DuckDB; nome do arquivo com a impressão (nunca sobrescreve); índice `manifest.json` com partes, colunas e arquivos retirados (guardados 30 min); `parseManifest` recusa índice de versão mais nova, tabela desconhecida ou faltando, nome inválido. `restoreDatabaseFromParts` em `backup.js` carrega parte a parte no `read_json`, sem montar o banco num texto só.
+- **Armadilha medida antes de virar defeito:** `bit_xor(hash(linha))` do DuckDB NÃO muda quando duas linhas recebem o mesmo valor novo na última coluna (o hash de linha combina a última coluna por ou-exclusivo). É o caso de "abater em massa": a parte não subiria. A impressão é `count + sum(hash) + bit_xor(hash(hash))`; o teste falha com o `bit_xor` simples (verificado por mutação).
+- **Commit 323 — a nuvem.** `cloudStorage.js` sobe só as partes que mudaram e, por último, o índice; lê pelo índice; conta sem índice abre pelo `dados.json` e migra no primeiro envio, sem esperar gravação. Depois de conferir que todas as partes estão na nuvem com o tamanho certo, copia `dados.json` para `dados-formato-antigo.json` (no servidor) e põe no lugar um texto que não é JSON: toda versão desde o commit 99 acusa erro ao abrir e não grava. O caminho `keepalive` do `beforeunload` saiu: nenhum envio cabia mais nos 60 KB.
+- **Defeito pego pelo e2e:** promessa de upload rejeitada enquanto a parte seguinte era exportada não tinha ninguém escutando — virava `unhandledrejection`, e o registro global de erros gravava uma linha por arquivo. Cada envio agora guarda a própria falha.
+- **Validado com o banco real** (cópia local do `dados.json`, contra o armazenamento falso de `e2e/helpers/fakeStorage.js`, que ganhou listar por pasta, copiar e apagar): 79 partes, maior 4,06 MiB, migração de 26,84 MiB; cópia do arquivo antigo idêntica byte a byte; índice igual ao banco parte por parte; marcar um abatimento sobe 2 arquivos e 0,13 MiB; reabrir pelo formato novo dá a mesma conciliação e não envia nada.
+- **Sobra conhecida:** as normalizações regravam `updated_at` de `donors` e `import_cpf_summary` a cada abertura, então a primeira alteração depois de abrir sobe essas duas partes junto (~0,1 MiB). Barato; corrigir fazendo os UPDATEs só onde o valor muda.
+- **Aberto:** o backup manual (Configurações) ainda monta um arquivo só — chega ao limite de texto do navegador por volta de abr/2027 (BK1 no DIAGNOSTICO.md).
+- 334 testes, 105/105 e2e, lint 0 erros, build OK.
 
 ## Convenções do projeto
 
-- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 320**.
+- Cada commit é numerado sequencialmente (`commit 56`, `commit 57`, ...). Estamos em **commit 324**.
 - Co-authored-by: `Claude Sonnet 4.6 <noreply@anthropic.com>` em todos os commits.
 - Mensagens de commit são curtas (`commit N`) — o conteúdo vai no diff.
 - Prefer `Edit` ao invés de `Write` para arquivos existentes.
