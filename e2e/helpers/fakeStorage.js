@@ -105,6 +105,9 @@ export async function startFakeStorage() {
     updatedAt: null,
     // Código HTTP com que todo upload é recusado; `null` aceita.
     rejectUploadsWith: null,
+    // Quanto o servidor demora para concluir um upload aceito. Serve para
+    // manter um envio "em andamento" enquanto o teste faz outra coisa.
+    uploadDelayMs: 0,
     // Um registro por tentativa de upload, aceita ou não.
     attempts: [],
   };
@@ -168,7 +171,12 @@ export async function startFakeStorage() {
       if (url.startsWith("/storage/v1/object/") && request.method === "POST") {
         const file = extractUploadedFile(body, request.headers["content-type"]);
         const accepted = state.rejectUploadsWith === null;
-        state.attempts.push({ at: Date.now(), accepted, bytes: file.length });
+        state.attempts.push({
+          at: Date.now(),
+          accepted,
+          bytes: file.length,
+          finished: !accepted,
+        });
 
         if (!accepted) {
           send(state.rejectUploadsWith, {
@@ -179,9 +187,13 @@ export async function startFakeStorage() {
           return;
         }
 
-        state.object = file;
-        state.updatedAt = new Date().toISOString();
-        send(200, { Key: `notar/${FAKE_USER_ID}/dados.json`, Id: "objeto-e2e" });
+        const attempt = state.attempts.at(-1);
+        setTimeout(() => {
+          state.object = file;
+          state.updatedAt = new Date().toISOString();
+          attempt.finished = true;
+          send(200, { Key: `notar/${FAKE_USER_ID}/dados.json`, Id: "objeto-e2e" });
+        }, state.uploadDelayMs);
         return;
       }
 
@@ -201,8 +213,11 @@ export async function startFakeStorage() {
     get attempts() {
       return state.attempts;
     },
+    /** Uploads aceitos E já concluídos (o servidor pode estar demorando). */
     get acceptedUploads() {
-      return state.attempts.filter((attempt) => attempt.accepted).length;
+      return state.attempts.filter(
+        (attempt) => attempt.accepted && attempt.finished,
+      ).length;
     },
     /** O snapshot que está "na nuvem", já decodificado; `null` se não há. */
     readStoredSnapshot() {
@@ -219,10 +234,18 @@ export async function startFakeStorage() {
     acceptUploads() {
       state.rejectUploadsWith = null;
     },
+    delayUploads(milliseconds) {
+      state.uploadDelayMs = milliseconds;
+    },
+    /** Como se outro dispositivo tivesse acabado de gravar por cima. */
+    touchFromAnotherDevice() {
+      state.updatedAt = new Date(Date.now() + 60_000).toISOString();
+    },
     reset() {
       state.object = null;
       state.updatedAt = null;
       state.rejectUploadsWith = null;
+      state.uploadDelayMs = 0;
       state.attempts = [];
     },
     close() {

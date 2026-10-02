@@ -22,6 +22,7 @@ import { localizeHydrationError } from "./cloudSyncUtils.js";
 import {
   fitsKeepaliveBudget,
   hasRemoteVersionChanged,
+  hasUnsyncedRevision,
   isObjectNotFoundError,
   nextUploadRetryDelay,
   pickSnapshotVersion,
@@ -57,6 +58,10 @@ let pendingTimer = null;
 // `scheduleUploadRetry`.
 let retryTimer = null;
 let consecutiveUploadFailures = 0;
+// Quantas gravações locais já houve, e até qual delas o último upload
+// bem-sucedido chegou — ver `hasUnsyncedRevision`.
+let localRevision = 0;
+let uploadedRevision = 0;
 let pendingPromise = null;
 let isUploading = false;
 let lastSyncedAt = null;
@@ -187,17 +192,43 @@ export async function checkForRemoteChanges() {
   }
 }
 
-// Called when the user picks "Manter minhas alterações" on the conflict
-// banner. Clearing the flag alone would leave whatever change triggered the
-// original (now-blocked) upload sitting unsent until the next unrelated
-// edit — push it immediately so the button's promise ("your changes win")
-// is actually true the moment it's clicked.
-export function acknowledgeRemoteConflict() {
+// O usuário escolheu "Manter minhas alterações" no aviso de conflito: o que
+// está neste navegador vai por cima do que o outro dispositivo gravou.
+//
+// Só limpar o aviso não basta. O upload checa conflito antes de subir, e a
+// checagem compara a versão do servidor com a última que ESTE navegador
+// conhecia — que continuava sendo a de antes do outro dispositivo gravar.
+// Resultado: o conflito era detectado de novo na hora, o aviso voltava e
+// nada subia, nem nas alterações seguintes. A única saída era "Recarregar",
+// que descarta o trabalho local — o contrário do que o botão promete.
+//
+// Aceitar o conflito é exatamente declarar a versão remota como vista. Por
+// isso a âncora é atualizada ANTES do upload. Se outro dispositivo gravar de
+// novo nesse intervalo, a checagem do upload pega e o aviso reaparece — o
+// que é o comportamento certo.
+export async function acknowledgeRemoteConflict() {
   if (!remoteConflict) return;
+
+  const userId = activeUserId;
+  if (userId) {
+    try {
+      const serverVersion = await fetchServerVersion(userId);
+      if (serverVersion) {
+        lastKnownServerVersion = serverVersion;
+      }
+    } catch (error) {
+      // Sem conseguir ler a versão remota não dá para aceitá-la: o aviso
+      // fica na tela e o usuário pode tentar de novo.
+      logError("cloudStorage.acknowledgeRemoteConflict", error);
+      return;
+    }
+  }
+
   remoteConflict = false;
   notifyConflictListeners();
-  if (activeUserId) {
-    uploadSnapshotImmediate(activeUserId);
+
+  if (userId && userId === activeUserId) {
+    await uploadSnapshotImmediate(userId);
   }
 }
 
@@ -208,6 +239,8 @@ export function setActiveCloudUser(userId) {
     cancelPendingTimer();
     cancelRetryTimer();
     consecutiveUploadFailures = 0;
+    localRevision = 0;
+    uploadedRevision = 0;
     // Invalidate the hydration cache so a new account on the same tab
     // forces a fresh download instead of trusting whatever happens to be
     // sitting in DuckDB right now.
@@ -324,6 +357,10 @@ async function performUpload(userId) {
   notifyListeners();
 
   pendingPromise = (async () => {
+    // Anotada ANTES de montar o snapshot: o que for gravado daqui em diante
+    // pode não estar nele, e precisa de outro envio.
+    const revisionAtSnapshot = localRevision;
+
     try {
       // O texto vem pronto do DuckDB. Montá-lo em JavaScript travava a
       // interface por meio segundo a cada gravação — ver `exportSnapshotText`.
@@ -345,6 +382,7 @@ async function performUpload(userId) {
       if (error) throw error;
       lastSyncedAt = new Date().toISOString();
       status = "idle";
+      uploadedRevision = Math.max(uploadedRevision, revisionAtSnapshot);
       consecutiveUploadFailures = 0;
       cancelRetryTimer();
       // Refresh our anchor of the server-side version so we won't trip the
@@ -373,6 +411,16 @@ async function performUpload(userId) {
     } finally {
       isUploading = false;
       pendingPromise = null;
+      // Houve gravação enquanto este envio estava no ar: ela não está no
+      // snapshot que acabou de subir. Só depois de um envio que DEU CERTO —
+      // quando falha, quem decide a próxima tentativa é o `scheduleUploadRetry`.
+      if (
+        status === "idle" &&
+        !pendingTimer &&
+        hasUnsyncedRevision(localRevision, uploadedRevision)
+      ) {
+        armFlushTimer();
+      }
       notifyListeners();
     }
   })();
@@ -449,10 +497,16 @@ async function flushBeforeUnload(userId) {
   await performUpload(userId);
 }
 
+// Chamado a cada gravação no banco (ver `setOnAfterTransaction`).
 export function scheduleCloudFlush() {
   if (!isSupabaseConfigured || !activeUserId) {
     return;
   }
+  localRevision += 1;
+  armFlushTimer();
+}
+
+function armFlushTimer() {
   cancelPendingTimer();
   // Uma alteração nova já vai tentar subir daqui a pouco; a nova tentativa
   // que estava esperando perdeu o sentido. O contador de falhas NÃO zera
@@ -555,16 +609,17 @@ setOnAfterTransaction(scheduleCloudFlush);
 
 // "Há trabalho que ainda não chegou à nuvem?"
 //
-// Além do envio agendado ou em andamento, conta a nova tentativa em espera e
-// o estado de erro em si. Sem o último, esgotadas as tentativas automáticas
-// a resposta voltava a ser "não" com uma alteração ainda por subir — e a aba
-// fechava sem aviso.
+// Além do envio agendado, em andamento ou esperando nova tentativa, conta
+// qualquer gravação que nenhum upload bem-sucedido levou. É essa última
+// parte que cobre os casos em que não há nada agendado e ainda assim há
+// trabalho por subir: tentativas automáticas esgotadas, sincronização
+// pausada por conflito. Sem ela a aba fechava sem aviso.
 export function hasPendingCloudWork() {
   return (
     Boolean(pendingTimer) ||
     Boolean(retryTimer) ||
     isUploading ||
-    status === "error"
+    hasUnsyncedRevision(localRevision, uploadedRevision)
   );
 }
 

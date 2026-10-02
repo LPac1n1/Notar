@@ -150,3 +150,19 @@ test("sem falha registrada não há o que tentar de novo", () => {
   assert.equal(nextUploadRetryDelay(undefined), null);
   assert.equal(nextUploadRetryDelay(1.5), null);
 });
+
+// Uma gravação feita com um upload já no ar não está no snapshot dele. Sem
+// contar revisões, o app terminava esse upload, não via nada agendado e se
+// dizia sincronizado com uma alteração só no navegador.
+test("gravação posterior ao snapshot enviado conta como não sincronizada", async () => {
+  const { hasUnsyncedRevision } = await import(
+    "../src/services/db/cloudSyncDecisions.js"
+  );
+
+  // Gravou três vezes; o upload levou até a segunda.
+  assert.equal(hasUnsyncedRevision(3, 2), true);
+  // O upload levou tudo.
+  assert.equal(hasUnsyncedRevision(3, 3), false);
+  // Nada gravado ainda.
+  assert.equal(hasUnsyncedRevision(0, 0), false);
+});

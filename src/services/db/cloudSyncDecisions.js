@@ -83,6 +83,21 @@ export function shouldFlushOnHide({
 }
 
 /**
+ * Há gravação local que nenhum upload bem-sucedido levou?
+ *
+ * Cada gravação soma um à revisão local; cada upload registra a revisão que
+ * o snapshot DELE continha. A diferença é o que ainda não está na nuvem.
+ *
+ * Existe porque "há um envio agendado ou em andamento" não responde a mesma
+ * pergunta: uma gravação feita com um envio já no ar não está no snapshot
+ * dele, e quando esse envio termina não sobra nada agendado — a alteração
+ * ficava só no navegador, com o app dizendo "sincronizado".
+ */
+export function hasUnsyncedRevision(localRevision, uploadedRevision) {
+  return Number(localRevision) > Number(uploadedRevision);
+}
+
+/**
  * Esperas entre as novas tentativas automáticas de upload, na ordem.
  *
  * Crescentes e FINITAS. Crescentes porque a falha mais comum é passageira

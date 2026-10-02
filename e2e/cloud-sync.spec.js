@@ -148,3 +148,69 @@ test("uma falha de upload não entra em laço, e a nova tentativa entrega", asyn
     storage.readStoredSnapshot().data.demands.map((demand) => demand.name),
   ).toContain("DEMANDA TEIMOSA");
 });
+
+const storedDemandNames = () =>
+  (storage.readStoredSnapshot()?.data.demands ?? []).map((demand) => demand.name);
+
+test("o que é gravado durante um envio em andamento também sobe", async ({
+  page,
+}) => {
+  // O servidor demora 6 s para concluir cada upload: tempo de sobra para o
+  // usuário gravar outra coisa enquanto o primeiro envio ainda está no ar.
+  storage.delayUploads(6_000);
+
+  await page.goto("/p/demandas-de-moradia");
+  await addDemand(page, "Primeira demanda");
+
+  // O primeiro envio saiu — com um snapshot montado ANTES da segunda demanda.
+  await expect
+    .poll(() => storage.attempts.length, { timeout: 30_000 })
+    .toBe(1);
+
+  await page.getByRole("button", { name: "Adicionar demanda" }).click();
+  const dialog = page.getByRole("dialog", { name: "Adicionar demanda" });
+  await dialog.getByPlaceholder("Nome da demanda").fill("Segunda demanda");
+  await dialog.getByRole("button", { name: "Adicionar demanda" }).click();
+  await expect(page.getByText("SEGUNDA DEMANDA")).toBeVisible();
+
+  // Antes da correção parava aqui: o envio em andamento terminava sem a
+  // segunda demanda, o app se dizia sincronizado e nada mais subia.
+  await expect
+    .poll(storedDemandNames, { timeout: 45_000 })
+    .toContain("SEGUNDA DEMANDA");
+  expect(storedDemandNames()).toContain("PRIMEIRA DEMANDA");
+});
+
+test("\"Manter minhas alterações\" sobe o que está aqui por cima do outro dispositivo", async ({
+  page,
+}) => {
+  await page.goto("/p/demandas-de-moradia");
+  await addDemand(page, "Demanda inicial");
+  await expect
+    .poll(() => storage.acceptedUploads, { timeout: 30_000 })
+    .toBe(1);
+
+  // Outro dispositivo grava na nuvem. A próxima gravação daqui esbarra nisso.
+  storage.touchFromAnotherDevice();
+
+  await page.getByRole("button", { name: "Adicionar demanda" }).click();
+  const dialog = page.getByRole("dialog", { name: "Adicionar demanda" });
+  await dialog.getByPlaceholder("Nome da demanda").fill("Demanda local");
+  await dialog.getByRole("button", { name: "Adicionar demanda" }).click();
+  await expect(page.getByText("DEMANDA LOCAL")).toBeVisible();
+
+  const banner = page.getByRole("alert").filter({
+    hasText: "Os dados foram atualizados em outro dispositivo",
+  });
+  await expect(banner).toBeVisible({ timeout: 30_000 });
+  // Enquanto o aviso está na tela, nada sobe.
+  expect(storage.acceptedUploads).toBe(1);
+
+  await banner.getByRole("button", { name: "Manter minhas alterações" }).click();
+
+  // Antes da correção o aviso sumia e voltava, e o upload nunca acontecia.
+  await expect
+    .poll(storedDemandNames, { timeout: 30_000 })
+    .toContain("DEMANDA LOCAL");
+  await expect(banner).toHaveCount(0);
+});
